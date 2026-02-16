@@ -1,0 +1,50 @@
+# ML Models and Data
+*.onnx
+*.bin
+*.npz
+*.sgfs
+*.ckpt
+*.h5
+*.pb
+*.weights
+*.engine
+*.profile
+
+# Executables and Libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.a
+*.o
+*.obj
+
+# Go
+/xionghan
+/vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# C++ / Build
+build/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+
+# Temporary and Cache
+tmp/
+trt_cache/
+*.log
+
+# System files
+.DS_Store
+Thumbs.db
