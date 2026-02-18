@@ -309,7 +309,9 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 		e2 := math.Exp(float64(v[2] - maxLogit))
 		sum := e0 + e1 + e2
 
-		// 根据训练代码 (trainingwrite.cpp)，Logit 0 总是 Black(White) 胜率，Logit 1 总是 Red(Black) 胜率
+		// 经验证，模型为固定视角输出：
+		// Logit 0 (e0) 始终代表黑方 (Black/Green) 胜率
+		// Logit 1 (e1) 始终代表红方 (Red) 胜率
 		blackWin := float32(e0 / sum)
 		redWin := float32(e1 / sum)
 
