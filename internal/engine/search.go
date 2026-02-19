@@ -164,12 +164,20 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		bestDepth = depth
 	}
 
+	// Default: map search score (red-positive) to [0,1].
 	winProb := (float32(bestScore)/10000.0 + 1.0) / 2.0
 	if winProb < 0 {
 		winProb = 0
 	}
 	if winProb > 1 {
 		winProb = 1
+	}
+	// UI label is "Red Win %". Prefer root NN red-win probability (fixed color view)
+	// to avoid shallow minimax max/min amplification that can look overly extreme.
+	if e.UseNN && e.nn != nil {
+		if root, err := e.nn.Evaluate(pos); err == nil {
+			winProb = root.LossProb // fixed red win prob
+		}
 	}
 
 	return SearchResult{

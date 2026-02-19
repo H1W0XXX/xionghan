@@ -295,9 +295,10 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	n.totalBatches++
 	n.totalItems += int64(batchSize)
 
-	// Post-process: Softmax and distribution
+	// Post-process: Softmax and convert to fixed color perspective.
+	// KataGomo value logits are [nextPlayerWin, nextPlayerLoss, draw].
 	for i, req := range requests {
-		// Value Head: 3 logits [Win, Loss, Draw]
+		// Value head raw logits.
 		v := n.value[i*3 : i*3+3]
 		
 		maxLogit := v[0]
@@ -309,11 +310,23 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 		e2 := math.Exp(float64(v[2] - maxLogit))
 		sum := e0 + e1 + e2
 
-		// 经验证，模型为固定视角输出：
-		// Logit 0 (e0) 始终代表黑方 (Black/Green) 胜率
-		// Logit 1 (e1) 始终代表红方 (Red) 胜率
-		blackWin := float32(e0 / sum)
-		redWin := float32(e1 / sum)
+		nextWin := float32(e0 / sum)
+		nextLoss := float32(e1 / sum)
+
+		// Convert from next-player perspective to fixed color perspective.
+		// In this project:
+		// - Go Black == KataGo P_WHITE
+		// - Go Red   == KataGo P_BLACK
+		var blackWin, redWin float32
+		if req.pos.SideToMove == xionghan.Black {
+			// nextPlayer is Black -> nextWin is black win prob.
+			blackWin = nextWin
+			redWin = nextLoss
+		} else {
+			// nextPlayer is Red -> nextWin is red win prob.
+			redWin = nextWin
+			blackWin = nextLoss
+		}
 
 		res := &NNResult{
 			Policy:   make([]float32, PolicySize),
@@ -326,7 +339,7 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	}
 
 	if n.totalBatches%500 == 0 {
-		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample WinProb=%.4f\n", 
+		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample ValueLogit0=%.4f\n", 
 			float64(n.totalItems)/float64(n.totalBatches), n.value[0])
 	}
 }
