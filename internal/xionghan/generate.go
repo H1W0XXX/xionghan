@@ -146,6 +146,12 @@ func (p *Position) GenerateLegalMoves(isAI bool) []Move {
 
 		out = append(out, mv)
 	}
+
+	// 兜底：AI 启发式过滤不应把“本来有合法步”的局面误判为无招。
+	// 若过滤后为空，回退到基础合法步生成（仅规则校验，不做 AI 过滤）。
+	if isAI && len(out) == 0 {
+		return p.GenerateLegalMoves(false)
+	}
 	return out
 }
 
