@@ -98,19 +98,20 @@ func (p *Position) GenerateLegalMoves(isAI bool) []Move {
 			if totalPieces > 30 {
 				movingPiece := p.Board.Squares[mv.From]
 				mpt := movingPiece.Type()
-				// 如果移动的是 车、炮、马、檑
-				if mpt == PieceRook || mpt == PieceCannon || mpt == PieceKnight || mpt == PieceLei {
+				// 如果移动的是 车、炮、马、檑、兵
+				if mpt == PieceRook || mpt == PieceCannon || mpt == PieceKnight || mpt == PieceLei ||
+					mpt == PiecePawn {
 					// 且移动后被对方的小兵盯着
 					if np.IsAttackedByPawn(mv.To, opposite(side)) {
 						// 除非这步棋本身能吃到对方同等或更高价值的子（先简化处理：如果是吃子步，且目标不是兵/卫/锋，则允许）
 						targetPiece := p.Board.Squares[mv.To]
 						if targetPiece == 0 {
-							// 纯送大子给兵吃，过滤掉
+							// 纯送子给兵吃，过滤掉
 							continue
 						}
 						tpt := targetPiece.Type()
 						if tpt == PiecePawn || tpt == PieceWei || tpt == PieceFeng {
-							// 用大子换对方的小卒/卫/锋，也不划算，过滤掉
+							// 用大子或兵换对方的小卒/卫/锋，也不划算，过滤掉
 							continue
 						}
 					}
