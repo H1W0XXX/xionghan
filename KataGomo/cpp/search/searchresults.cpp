@@ -406,6 +406,10 @@ Loc Search::getChosenMoveLoc() {
     Loc kingCaptureLoc = GameLogic::findImmediateKingCapture(rootBoard, rootPla);
     if(kingCaptureLoc != Board::NULL_LOC)
       return kingCaptureLoc;
+
+    Loc vcfLoc = GameLogic::findVCFMove(rootBoard, rootHistory, rootPla, 4);
+    if(vcfLoc != Board::NULL_LOC)
+      return vcfLoc;
   }
 
   vector<Loc> locs;

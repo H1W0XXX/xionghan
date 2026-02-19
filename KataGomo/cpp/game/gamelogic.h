@@ -32,6 +32,7 @@ namespace GameLogic {
   bool isInCheck(const Board& board, Player side);
 
   Loc findImmediateKingCapture(const Board& board, Player pla);
+  Loc findVCFMove(const Board& board, const BoardHistory& hist, Player pla, int maxDepth);
 
   float getMoveValueGain(const Board& board, Player pla, Loc loc);
 

@@ -21,6 +21,7 @@
 #include <utility>
 
 #include <mutex>
+#include <set>
 
 
 
@@ -70,6 +71,159 @@ namespace {
 
     return false;
 
+  }
+
+  int totalPieces(const Board& board) {
+    int count = 0;
+    for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+      Color c = board.colors[i];
+      if(c != C_EMPTY && c != C_WALL)
+        count++;
+    }
+    return count;
+  }
+
+  void collectLegalMoves(const Board& board, Player pla, std::vector<Loc>& outMoves) {
+    outMoves.clear();
+    int8_t mask[Board::MAX_ARR_SIZE];
+    GameLogic::getLegalBitmask(board, pla, mask);
+    for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+      if(mask[i] != 0 && (board.isOnBoard((Loc)i) || i == Board::PASS_LOC))
+        outMoves.push_back((Loc)i);
+    }
+  }
+
+  bool applyLegalMove(
+    const Board& board,
+    const BoardHistory& hist,
+    Player pla,
+    Loc loc,
+    Board& outBoard,
+    BoardHistory& outHist
+  ) {
+    if(!hist.isLegal(board, loc, pla))
+      return false;
+    outBoard = board;
+    outHist = hist;
+    outHist.makeBoardMoveAssumeLegal(outBoard, loc, pla);
+    return true;
+  }
+
+  bool moveCapturesOppKing(const Board& board, Player pla, Loc loc) {
+    if(board.stage != 1)
+      return false;
+    Color dest = board.colors[loc];
+    if(dest == C_EMPTY || dest == C_WALL)
+      return false;
+    return getPiecePla(dest) == getOpp(pla) && getPieceType(dest) == PT_KING;
+  }
+
+  bool hasImmediateCheckOrKingCaptureAfterChoose(const Board& board, const BoardHistory& hist, Player pla) {
+    if(board.nextPla != pla)
+      return false;
+    std::vector<Loc> replyMoves;
+    collectLegalMoves(board, pla, replyMoves);
+    for(Loc loc : replyMoves) {
+      if(moveCapturesOppKing(board, pla, loc))
+        return true;
+      Board nextBoard;
+      BoardHistory nextHist;
+      if(!applyLegalMove(board, hist, pla, loc, nextBoard, nextHist))
+        continue;
+      if(!kingExists(nextBoard, getOpp(pla)))
+        return true;
+      if(nextBoard.nextPla != pla && GameLogic::isInCheck(nextBoard, nextBoard.nextPla))
+        return true;
+    }
+    return false;
+  }
+
+  bool isVCFAttackMoveCandidate(const Board& board, const BoardHistory& hist, Player pla, Loc loc) {
+    if(moveCapturesOppKing(board, pla, loc))
+      return true;
+
+    Board nextBoard;
+    BoardHistory nextHist;
+    if(!applyLegalMove(board, hist, pla, loc, nextBoard, nextHist))
+      return false;
+
+    if(!kingExists(nextBoard, getOpp(pla)))
+      return true;
+
+    // stage 0 -> stage 1: selecting a piece isn't check yet, but should at least have a checking/capturing follow-up.
+    if(nextBoard.nextPla == pla)
+      return hasImmediateCheckOrKingCaptureAfterChoose(nextBoard, nextHist, pla);
+
+    return GameLogic::isInCheck(nextBoard, nextBoard.nextPla);
+  }
+
+  bool canForceVCFInternal(
+    const Board& board,
+    const BoardHistory& hist,
+    Player attacker,
+    int depth,
+    std::set<Hash128>& path
+  ) {
+    if(depth <= 0)
+      return false;
+    if(!kingExists(board, attacker))
+      return false;
+
+    Player defender = getOpp(attacker);
+    if(!kingExists(board, defender))
+      return true;
+
+    Hash128 h = board.pos_hash;
+    if(path.find(h) != path.end())
+      return false;
+    path.insert(h);
+
+    const Player toMove = board.nextPla;
+    std::vector<Loc> moves;
+    collectLegalMoves(board, toMove, moves);
+
+    if(moves.empty()) {
+      path.erase(h);
+      return toMove != attacker;
+    }
+
+    if(toMove == attacker) {
+      for(Loc loc : moves) {
+        if(!isVCFAttackMoveCandidate(board, hist, attacker, loc))
+          continue;
+
+        Board nextBoard;
+        BoardHistory nextHist;
+        if(!applyLegalMove(board, hist, attacker, loc, nextBoard, nextHist))
+          continue;
+
+        if(!kingExists(nextBoard, defender)) {
+          path.erase(h);
+          return true;
+        }
+        if(canForceVCFInternal(nextBoard, nextHist, attacker, depth-1, path)) {
+          path.erase(h);
+          return true;
+        }
+      }
+      path.erase(h);
+      return false;
+    }
+
+    for(Loc loc : moves) {
+      Board nextBoard;
+      BoardHistory nextHist;
+      if(!applyLegalMove(board, hist, toMove, loc, nextBoard, nextHist))
+        continue;
+
+      if(!canForceVCFInternal(nextBoard, nextHist, attacker, depth-1, path)) {
+        path.erase(h);
+        return false;
+      }
+    }
+
+    path.erase(h);
+    return true;
   }
 
 
@@ -649,6 +803,42 @@ Loc GameLogic::findImmediateKingCapture(const Board& board, Player pla) {
     for(auto& mv : legalMoves) {
       if(isKing(mv.second)) return mv.first;
     }
+  }
+  return Board::NULL_LOC;
+}
+
+Loc GameLogic::findVCFMove(const Board& board, const BoardHistory& hist, Player pla, int maxDepth) {
+  if(maxDepth <= 0)
+    return Board::NULL_LOC;
+  if(maxDepth > 4)
+    maxDepth = 4;
+
+  if(board.nextPla != pla)
+    return Board::NULL_LOC;
+
+  // Keep VCF as an endgame tactical override, avoid heavy branching in crowded positions.
+  if(totalPieces(board) > 43)
+    return Board::NULL_LOC;
+
+  std::vector<Loc> moves;
+  collectLegalMoves(board, pla, moves);
+  Player defender = getOpp(pla);
+  for(Loc loc : moves) {
+    if(!isVCFAttackMoveCandidate(board, hist, pla, loc))
+      continue;
+
+    Board nextBoard;
+    BoardHistory nextHist;
+    if(!applyLegalMove(board, hist, pla, loc, nextBoard, nextHist))
+      continue;
+
+    if(!kingExists(nextBoard, defender))
+      return loc;
+
+    std::set<Hash128> path;
+    path.insert(board.pos_hash);
+    if(canForceVCFInternal(nextBoard, nextHist, pla, maxDepth-1, path))
+      return loc;
   }
   return Board::NULL_LOC;
 }
