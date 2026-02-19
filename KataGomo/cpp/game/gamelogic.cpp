@@ -554,6 +554,33 @@ bool GameLogic::isLegal(const Board& board, Player pla, Loc loc) {
   return mask[loc] != 0;
 }
 
+bool GameLogic::isAttacked(const Board& board, Loc sq, Player bySide) {
+  for(int r=0; r<13; r++) {
+    for(int c=0; c<13; c++) {
+      Loc from = indexOf(r, c, board.x_size);
+      if(board.colors[from] != C_EMPTY && board.colors[from] != C_WALL && getPiecePla(board.colors[from]) == bySide) {
+        std::vector<Loc> tos;
+        genMoves(board, from, tos);
+        for(Loc to : tos) {
+          if(to == sq) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool GameLogic::isInCheck(const Board& board, Player side) {
+  for(int i=0; i<Board::MAX_ARR_SIZE; i++) {
+    if(board.colors[i] != C_EMPTY && board.colors[i] != C_WALL) {
+      if(getPiecePla(board.colors[i]) == side && getPieceType(board.colors[i]) == PT_KING) {
+        return isAttacked(board, i, getOpp(side));
+      }
+    }
+  }
+  return false;
+}
+
 void GameLogic::getLegalBitmask(const Board& board, Player pla, int8_t* maskOut) {
   for(int i=0; i<Board::MAX_ARR_SIZE; i++) maskOut[i] = 0;
   

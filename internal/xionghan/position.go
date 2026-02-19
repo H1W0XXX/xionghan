@@ -57,3 +57,13 @@ func (p *Position) KingExists(side Side) bool {
 	}
 	return false
 }
+
+func (p *Position) TotalPieces() int {
+	count := 0
+	for _, pc := range p.Board.Squares {
+		if pc != 0 {
+			count++
+		}
+	}
+	return count
+}

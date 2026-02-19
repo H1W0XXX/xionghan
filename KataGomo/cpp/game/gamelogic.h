@@ -28,6 +28,9 @@ namespace GameLogic {
   bool isLegal(const Board& board, Player pla, Loc loc);
   void getLegalBitmask(const Board& board, Player pla, int8_t* maskOut);
 
+  bool isAttacked(const Board& board, Loc sq, Player bySide);
+  bool isInCheck(const Board& board, Player side);
+
   Loc findImmediateKingCapture(const Board& board, Player pla);
 
   float getMoveValueGain(const Board& board, Player pla, Loc loc);

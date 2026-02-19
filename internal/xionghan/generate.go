@@ -1,8 +1,7 @@
 package xionghan
 
-// 伪合法（不考虑自己王被将军），先够你测试走法 & 前端交互
-func (p *Position) GeneratePseudoMoves() []Move {
-	side := p.SideToMove
+// 生成指定一方的伪合法走法
+func (p *Position) GeneratePseudoMovesForSide(side Side) []Move {
 	var moves []Move
 	for sq := 0; sq < NumSquares; sq++ {
 		pc := p.Board.Squares[sq]
@@ -33,6 +32,11 @@ func (p *Position) GeneratePseudoMoves() []Move {
 		}
 	}
 	return moves
+}
+
+// 伪合法（不考虑自己王被将军）
+func (p *Position) GeneratePseudoMoves() []Move {
+	return p.GeneratePseudoMovesForSide(p.SideToMove)
 }
 
 // GenerateLegalMoves 生成合法走法

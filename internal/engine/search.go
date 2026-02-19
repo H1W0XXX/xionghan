@@ -63,9 +63,43 @@ func (e *Engine) eval(pos *xionghan.Position) int {
 	return Evaluate(pos)
 }
 
+// FilterVCFMoves 过滤掉会导致被对方连将绝杀或直接吃王的走法。
+func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) []xionghan.Move {
+	if pos.TotalPieces() > 43 || len(moves) <= 1 {
+		return moves
+	}
+
+	var safeMoves []xionghan.Move
+	for _, mv := range moves {
+		nextPos, ok := pos.ApplyMove(mv)
+		if !ok {
+			continue
+		}
+		
+		// 1. 检查对手是否能在下一手直接吃王（预防非将军的杀招）
+		if e.CanCaptureKingNext(nextPos) {
+			continue
+		}
+
+		// 2. 检查对手是否能进入 VCF 连将杀（预防必杀局）
+		vcf := e.VCFSearch(nextPos, 4)
+		if vcf.CanWin {
+			continue
+		}
+
+		safeMoves = append(safeMoves, mv)
+	}
+
+	// 如果所有走法都导致输棋，则不进行过滤，维持原样（等死）
+	if len(safeMoves) == 0 {
+		return moves
+	}
+	return safeMoves
+}
+
 // 根节点搜索：带简单迭代加深（根节点内部并行）
 func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
-	// 绝杀剪枝：如果当前能直接吃到对方的王，直接返回该走法，不再进行任何搜索
+	// 1. 绝杀判定：直接吃王
 	moves := pos.GenerateLegalMoves(true)
 	for _, mv := range moves {
 		targetPiece := pos.Board.Squares[mv.To]
@@ -78,6 +112,22 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 				Nodes:    1,
 				TimeUsed: 0,
 				PV:       []xionghan.Move{mv},
+			}
+		}
+	}
+
+	// 2. VCF 连将赢判定（抢杀）
+	if pos.TotalPieces() <= 43 {
+		vcfRes := e.VCFSearch(pos, 4)
+		if vcfRes.CanWin {
+			return SearchResult{
+				BestMove: vcfRes.Move,
+				Score:    900000,
+				WinProb:  1.0,
+				Depth:    4,
+				Nodes:    100,
+				TimeUsed: 0,
+				PV:       []xionghan.Move{vcfRes.Move},
 			}
 		}
 	}
@@ -133,6 +183,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 // 根节点：根据 SideToMove 决定是 max 还是 min，并行搜索每个着法
 func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) (int, xionghan.Move) {
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
 		// 没招就直接返回静态评估
 		return e.eval(pos), xionghan.Move{}
@@ -319,6 +370,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 	}
 
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
 		// 没招，简单直接评估（以后可以做将死检测）
 		return e.eval(pos)
