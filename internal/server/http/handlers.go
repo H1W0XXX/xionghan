@@ -218,8 +218,12 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 设置轮到谁走（以请求参数为准）
-	pos.SideToMove = intToSide(req.ToMove)
+	// 设置轮到谁走（以请求参数为准）；若与 FEN 不同，同步重建 Hash 保持一致性。
+	reqSide := intToSide(req.ToMove)
+	if pos.SideToMove != reqSide {
+		pos.SideToMove = reqSide
+		pos.Hash = pos.CalculateHash()
+	}
 
 	// ===== 2. 搜索参数 =====
 	depth := req.MaxDepth

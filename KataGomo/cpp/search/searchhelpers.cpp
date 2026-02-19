@@ -183,32 +183,6 @@ std::shared_ptr<NNOutput>* Search::maybeAddPolicyNoiseAndTemp(SearchThread& thre
     addDirichletNoise(searchParams, thread.rand, policySize, noisedPolicyProbs);
   }
 
-  // 50% probability to apply a heuristic bias toward capturing moves to help the AI learn to eat pieces.
-  if (thread.rand.nextBool(0.5)) {
-    for (int i = 0; i < policySize; i++) {
-      if (noisedPolicyProbs[i] > 0) {
-        Loc loc = NNPos::posToLoc(i, rootBoard.x_size, rootBoard.y_size, nnXLen, nnYLen);
-        if (rootBoard.isOnBoard(loc)) {
-          float gain = GameLogic::getMoveValueGain(rootBoard, rootNode->nextPla, loc);
-          if (gain > 0) {
-            // Add a small logit-space bias. 0.5f is a moderate nudge.
-            noisedPolicyProbs[i] *= (float)exp(gain * 0.2f);
-          }
-        }
-      }
-    }
-    // Re-normalize
-    double sum = 0.0;
-    for (int i = 0; i < policySize; i++) {
-      if (noisedPolicyProbs[i] > 0) sum += noisedPolicyProbs[i];
-    }
-    if (sum > 0.0) {
-      for (int i = 0; i < policySize; i++) {
-        if (noisedPolicyProbs[i] >= 0) noisedPolicyProbs[i] /= (float)sum;
-      }
-    }
-  }
-
   //Move a small amount of policy to the hint move, around the same level that noising it would achieve
   if(rootHintLoc != Board::NULL_LOC) {
     const float propToMove = 0.02f;

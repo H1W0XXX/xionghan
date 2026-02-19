@@ -12,6 +12,9 @@ import (
 const (
 	// 一个足够大的值，当成正负无穷
 	scoreInf = 1_000_000_000
+
+	vcfDepthFilter = 5
+	vcfDepthRoot   = 6
 )
 
 // 搜索配置
@@ -75,14 +78,14 @@ func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) [
 		if !ok {
 			continue
 		}
-		
+
 		// 1. 检查对手是否能在下一手直接吃王（预防非将军的杀招）
 		if e.CanCaptureKingNext(nextPos) {
 			continue
 		}
 
 		// 2. 检查对手是否能进入 VCF 连将杀（预防必杀局）
-		vcf := e.VCFSearch(nextPos, 4)
+		vcf := e.VCFSearch(nextPos, vcfDepthFilter)
 		if vcf.CanWin {
 			continue
 		}
@@ -118,13 +121,13 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 
 	// 2. VCF 连将赢判定（抢杀）
 	if pos.TotalPieces() <= 43 {
-		vcfRes := e.VCFSearch(pos, 4)
+		vcfRes := e.VCFSearch(pos, vcfDepthRoot)
 		if vcfRes.CanWin {
 			return SearchResult{
 				BestMove: vcfRes.Move,
 				Score:    900000,
 				WinProb:  1.0,
-				Depth:    4,
+				Depth:    vcfDepthRoot,
 				Nodes:    100,
 				TimeUsed: 0,
 				PV:       []xionghan.Move{vcfRes.Move},
@@ -201,8 +204,8 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			}
 
 			type moveScore struct {
-				idx   int
-				prob  float32
+				idx  int
+				prob float32
 			}
 			scores := make([]moveScore, len(moves))
 
@@ -277,7 +280,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 		}
 		bestMove := children[0].move
 		// 根节点也存一下 TT（全局 tt 仍然单线程访问）
-		e.storeTT(key, depth, score, bestMove)
+		e.storeTT(key, depth, score, ttExact, bestMove)
 		return score, bestMove
 	}
 
@@ -348,7 +351,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	}
 
 	// 根节点存 TT（全局 tt 依然只有主 goroutine 访问）
-	e.storeTT(key, depth, bestScore, bestMove)
+	e.storeTT(key, depth, bestScore, ttExact, bestMove)
 	return bestScore, bestMove
 }
 
@@ -365,8 +368,33 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 	}
 
 	key := hashPosition(pos)
-	if entry, ok := e.tt[key]; ok && entry.Depth >= depth {
-		return entry.Score
+	origAlpha, origBeta := alpha, beta
+	ttMove := xionghan.Move{}
+	if entry, ok := e.tt[key]; ok {
+		ttMove = entry.Move
+		if entry.Depth >= depth {
+			switch entry.Flag {
+			case ttExact:
+				return entry.Score
+			case ttUpperBound:
+				if entry.Score <= alpha {
+					return entry.Score
+				}
+				if entry.Score < beta {
+					beta = entry.Score
+				}
+			case ttLowerBound:
+				if entry.Score >= beta {
+					return entry.Score
+				}
+				if entry.Score > alpha {
+					alpha = entry.Score
+				}
+			}
+			if alpha >= beta {
+				return entry.Score
+			}
+		}
 	}
 
 	moves := pos.GenerateLegalMoves(true)
@@ -378,8 +406,17 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 
 	side := pos.SideToMove
 	orderMovesByCaptureFirst(pos, moves)
+	if ttMove.From != 0 || ttMove.To != 0 {
+		for i := range moves {
+			if moves[i].From == ttMove.From && moves[i].To == ttMove.To {
+				moves[0], moves[i] = moves[i], moves[0]
+				break
+			}
+		}
+	}
 
 	var bestScore int
+	bestMove := xionghan.Move{}
 	if side == xionghan.Red {
 		bestScore = math.MinInt
 		for i := range moves {
@@ -390,6 +427,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
 			if score > bestScore {
 				bestScore = score
+				bestMove = moves[i]
 			}
 			if score > alpha {
 				alpha = score
@@ -408,6 +446,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
 			if score < bestScore {
 				bestScore = score
+				bestMove = moves[i]
 			}
 			if score < beta {
 				beta = score
@@ -418,8 +457,19 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 		}
 	}
 
+	if bestMove.From == 0 && bestMove.To == 0 {
+		return e.eval(pos)
+	}
+
+	flag := ttExact
+	if bestScore <= origAlpha {
+		flag = ttUpperBound
+	} else if bestScore >= origBeta {
+		flag = ttLowerBound
+	}
+
 	// 存入 TT（这里写的是局部 Engine 的 tt，不会有并发冲突）
-	e.storeTT(key, depth, bestScore, xionghan.Move{})
+	e.storeTT(key, depth, bestScore, flag, bestMove)
 	return bestScore
 }
 

@@ -155,8 +155,10 @@ func parseInitialBoard() Board {
 }
 
 func NewInitialPosition() *Position {
-	return &Position{
+	pos := &Position{
 		Board:      parseInitialBoard(),
 		SideToMove: Red, // 红先
 	}
+	pos.Hash = pos.CalculateHash()
+	return pos
 }

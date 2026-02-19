@@ -91,8 +91,10 @@ func DecodePosition(fen string) (*Position, error) {
 	} else {
 		stm = Black
 	}
-	return &Position{
+	pos := &Position{
 		Board:      b,
 		SideToMove: stm,
-	}, nil
+	}
+	pos.Hash = pos.CalculateHash()
+	return pos, nil
 }

@@ -44,6 +44,9 @@ CMakeCache.txt
 tmp/
 trt_cache/
 *.log
+.gocache/
+.cache/
+.gomodcache/
 
 # System files
 .DS_Store

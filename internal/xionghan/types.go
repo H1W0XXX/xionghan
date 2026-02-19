@@ -66,4 +66,5 @@ type Move struct {
 type Position struct {
 	Board      Board
 	SideToMove Side
+	Hash       uint64
 }

@@ -83,7 +83,28 @@ func (p *Position) GenerateLegalMoves(isAI bool) []Move {
 		}
 
 		if isAI {
-			// ② 开局限制：禁止 AI 在早期乱动王和士
+			// ① 开局方向限制：子力很多时，四类大子不搜索“反方向”走法。
+			if totalPieces > 42 {
+				pt := p.Board.Squares[mv.From].Type()
+				if pt == PieceKnight || pt == PieceCannon || pt == PieceRook || pt == PieceLei {
+					fromRow, toRow := rowOf(mv.From), rowOf(mv.To)
+					if side == Red && toRow > fromRow {
+						continue
+					}
+					if side == Black && toRow < fromRow {
+						continue
+					}
+				}
+			}
+
+			// ② 开局额外过滤：子力很多时，不搜索“不吃子/吃小兵后立刻被吃”的走法。
+			if totalPieces > 42 && (target == 0 || target.Type() == PiecePawn) {
+				if np.IsAttacked(mv.To, opposite(side)) {
+					continue
+				}
+			}
+
+			// ③ 开局限制：禁止 AI 在早期乱动王和士
 			if totalPieces >= 44 && !currentlyInCheck {
 				pt := p.Board.Squares[mv.From].Type()
 				if pt == PieceKing || pt == PieceAdvisor {
@@ -91,14 +112,14 @@ func (p *Position) GenerateLegalMoves(isAI bool) []Move {
 				}
 			}
 
-			// ③ 送王拦截：AI 搜索时禁止主动送将（除非只剩下王）
+			// ④ 送王拦截：AI 搜索时禁止主动送将（除非只剩下王）
 			if myPieceCount > 1 {
 				if np.IsInCheck(side) {
 					continue
 				}
 			}
 
-			// ④ 避兔弱智送子：大子换小兵拦截
+			// ⑤ 避兔弱智送子：大子换小兵拦截
 			if totalPieces > 30 {
 				movingPiece := p.Board.Squares[mv.From]
 				mpt := movingPiece.Type()
@@ -137,9 +158,22 @@ func (p *Position) ApplyMove(m Move) (*Position, bool) {
 	if pc == 0 || pc.Side() != p.SideToMove {
 		return nil, false
 	}
+	captured := p.Board.Squares[m.To]
+
 	np := *p
 	np.Board.Squares[m.To] = pc
 	np.Board.Squares[m.From] = 0
 	np.SideToMove = opposite(p.SideToMove)
+
+	// 增量 Zobrist：移除 from 的子、移除被吃子（若有）、加入 to 的子、切换走子方。
+	h := p.EnsureHash()
+	h ^= pieceHashKey(pc, m.From)
+	if captured != 0 {
+		h ^= pieceHashKey(captured, m.To)
+	}
+	h ^= pieceHashKey(pc, m.To)
+	h ^= zobristSide
+	np.Hash = h
+
 	return &np, true
 }
