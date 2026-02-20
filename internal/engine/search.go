@@ -132,6 +132,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 
 	// 1. 绝杀判定：直接吃王
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterLeiLockedMoves(pos, moves)
 	for _, mv := range moves {
 		targetPiece := pos.Board.Squares[mv.To]
 		if targetPiece != 0 && targetPiece.Type() == xionghan.PieceKing {
@@ -237,6 +238,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	}
 
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterLeiLockedMoves(pos, moves)
 	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
@@ -475,6 +477,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 	}
 
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterLeiLockedMoves(pos, moves)
 	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
