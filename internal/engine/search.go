@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -15,7 +16,14 @@ const (
 
 	vcfDepthFilter = 5
 	vcfDepthRoot   = 6
+
+	// If root top-2 scores are close enough, randomize between them for less deterministic play.
+	rootTopTwoRandomGap = 60
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 // 搜索配置
 type SearchConfig struct {
@@ -38,36 +46,50 @@ type SearchResult struct {
 // 从红方视角的评价：正数红方好，负数黑方好
 // 为了 alpha-beta，调用时根据 sideToMove 做“极大/极小”选择。
 func Evaluate(pos *xionghan.Position) int {
-	materialPos := evaluateMaterialPositional(pos)
-	kingSafety := evaluateKingSafety(pos)
-	mobility := evaluateMobility(pos)
+	// Legacy handcrafted evaluation is intentionally disabled.
+	// Keep this function as a placeholder to avoid accidental reuse.
+	/*
+		materialPos := evaluateMaterialPositional(pos)
+		kingSafety := evaluateKingSafety(pos)
+		mobility := evaluateMobility(pos)
 
-	tempo := 0
-	if pos.SideToMove == xionghan.Red {
-		tempo = tempoBonus
-	} else if pos.SideToMove == xionghan.Black {
-		tempo = -tempoBonus
-	}
+		tempo := 0
+		if pos.SideToMove == xionghan.Red {
+			tempo = tempoBonus
+		} else if pos.SideToMove == xionghan.Black {
+			tempo = -tempoBonus
+		}
 
-	return materialPos + kingSafety + mobility + tempo
+		return materialPos + kingSafety + mobility + tempo
+	*/
+	_ = pos
+	return 0
 }
 
 // 搜索层调用这个
 func (e *Engine) eval(pos *xionghan.Position) int {
-	if e.UseNN && e.nn != nil {
-		res, err := e.nn.Evaluate(pos)
-		if err == nil && res != nil {
-			// 将胜率/分数转换为整数分。
-			// NN 输出 winProb 是 P_WHITE (Black) 的胜率，lossProb 是 P_BLACK (Red) 的胜率。
-			// 搜索视角是 Red 为正，所以 score = RedWinProb - BlackWinProb
-			winLoss := res.LossProb - res.WinProb
-			return int(winLoss * 10000)
-		}
-		// 不回退手工评估：标记 NN 故障并中止本次搜索。
+	if e.nn == nil {
+		// Handcrafted eval is disabled; NN is required.
 		e.markNNFailure()
 		return 0
 	}
-	return Evaluate(pos)
+	key := hashPosition(pos)
+	if cached, ok := e.getNNEvalFromCache(key); ok {
+		return cached
+	}
+	res, err := e.nn.Evaluate(pos)
+	if err == nil && res != nil {
+		// 将胜率/分数转换为整数分。
+		// NN 输出 winProb 是 P_WHITE (Black) 的胜率，lossProb 是 P_BLACK (Red) 的胜率。
+		// 搜索视角是 Red 为正，所以 score = RedWinProb - BlackWinProb
+		winLoss := res.LossProb - res.WinProb
+		score := int(winLoss * 10000)
+		e.storeNNEvalCache(key, score)
+		return score
+	}
+	// 不回退手工评估：标记 NN 故障并中止本次搜索。
+	e.markNNFailure()
+	return 0
 }
 
 // FilterVCFMoves 过滤掉会导致被对方连将绝杀或直接吃王的走法。
@@ -316,6 +338,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			nn:             e.nn,
 			UseNN:          e.UseNN,
 			nnAbort:        e.nnAbort,
+			nnCache:        e.nnCache,
 		}
 		score := local.alphaBeta(children[0].child, depth-1, alpha, beta, deadline)
 		if local.nodes != 0 {
@@ -346,6 +369,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				nn:             e.nn,
 				UseNN:          e.UseNN,
 				nnAbort:        e.nnAbort,
+				nnCache:        e.nnCache,
 			}
 			score := local.alphaBeta(ch.child, depth-1, alpha, beta, deadline)
 			if local.nodes != 0 {
@@ -359,37 +383,38 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	}
 
 	bestMove := xionghan.Move{}
-	var bestScore int
-	if side == xionghan.Red {
-		bestScore = math.MinInt
-	} else {
-		bestScore = math.MaxInt
-	}
-
+	rootResults := make([]rootResult, 0, len(children))
 	for i := 0; i < len(children); i++ {
 		r := <-results
+		rootResults = append(rootResults, r)
+	}
 
-		// 第一个有效结果直接作为初始 best
-		if bestMove.From == 0 && bestMove.To == 0 {
-			bestMove = r.move
-			bestScore = r.score
-			continue
+	if len(rootResults) == 0 {
+		return e.eval(pos), xionghan.Move{}
+	}
+
+	if side == xionghan.Red {
+		sort.SliceStable(rootResults, func(i, j int) bool {
+			return rootResults[i].score > rootResults[j].score
+		})
+	} else {
+		sort.SliceStable(rootResults, func(i, j int) bool {
+			return rootResults[i].score < rootResults[j].score
+		})
+	}
+
+	best := rootResults[0]
+	if len(rootResults) >= 2 {
+		gap := rootResults[0].score - rootResults[1].score
+		if gap < 0 {
+			gap = -gap
 		}
-
-		if side == xionghan.Red {
-			// 极大层
-			if r.score > bestScore {
-				bestScore = r.score
-				bestMove = r.move
-			}
-		} else {
-			// 极小层
-			if r.score < bestScore {
-				bestScore = r.score
-				bestMove = r.move
-			}
+		if gap <= rootTopTwoRandomGap && rand.Intn(2) == 1 {
+			best = rootResults[1]
 		}
 	}
+	bestMove = best.move
+	bestScore := best.score
 	if e.hasNNFailure() {
 		return 0, xionghan.Move{}
 	}

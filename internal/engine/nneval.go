@@ -24,6 +24,8 @@ const (
 	PolicySize         = BoardSize*BoardSize + 1
 	MaxBatchSize       = 64
 	BatchTimeout       = 1 * time.Millisecond
+	// Align with C++ nnPolicyTemperature (policy logits are scaled by 1/temp before softmax).
+	NNPolicyTemperature = 1.0
 )
 
 const (
@@ -566,12 +568,18 @@ func postProcessPolicy(raw []float32, legalMask *[PolicySize]bool, legalCount in
 		}
 	}
 
+	temp := NNPolicyTemperature
+	if math.IsNaN(temp) || math.IsInf(temp, 0) || temp <= 0 {
+		temp = 1.0
+	}
+	invTemp := 1.0 / temp
+
 	policySum := 0.0
 	for i := 0; i < PolicySize; i++ {
 		if !(*legalMask)[i] {
 			continue
 		}
-		v := math.Exp(float64(raw[i]) - maxPolicy)
+		v := math.Exp((float64(raw[i]) - maxPolicy) * invTemp)
 		out[i] = float32(v)
 		policySum += v
 	}

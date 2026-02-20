@@ -20,7 +20,7 @@ const (
 )
 
 // FilterBlunderMoves 过滤“纯送子”弱智步：
-// 仅针对车/炮/马/檑/兵，且本步不吃子、不将军、落到对方半场。
+// 仅针对车/炮/马/檑/兵，且本步不吃子、不将军。
 func (e *Engine) FilterBlunderMoves(pos *xionghan.Position, moves []xionghan.Move) []xionghan.Move {
 	if len(moves) <= 1 {
 		return moves
