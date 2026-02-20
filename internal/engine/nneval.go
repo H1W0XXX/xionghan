@@ -359,8 +359,12 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 			Score:    redWin - blackWin,
 		}
 		rawPolicy := n.policy[i*PolicySize : (i+1)*PolicySize]
+		policyForBoard := rawPolicy
+		if req.pos.SideToMove == xionghan.Black {
+			policyForBoard = unflipPolicyY(rawPolicy)
+		}
 		legalMask, legalCount := buildPolicyLegalMask(req.pos, req.stage, req.chosenSquare)
-		res.Policy = postProcessPolicy(rawPolicy, &legalMask, legalCount)
+		res.Policy = postProcessPolicy(policyForBoard, &legalMask, legalCount)
 		req.result <- res
 	}
 
@@ -385,6 +389,7 @@ func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, c
 	}
 
 	pla := pos.SideToMove
+	flipY := pla == xionghan.Black
 
 	// Plane 0: On board
 	for i := 0; i < planeSize; i++ {
@@ -410,13 +415,15 @@ func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, c
 		}
 
 		if featureIdx < 23 {
-			subBin[featureIdx*planeSize+sq] = 1.0
+			featureSq := mapSquareForNN(sq, flipY)
+			subBin[featureIdx*planeSize+featureSq] = 1.0
 		}
 	}
 
 	// Plane 23: Chosen piece (for Stage 1)
 	if stage == 1 && chosenSquare >= 0 && chosenSquare < planeSize {
-		subBin[23*planeSize+chosenSquare] = 1.0
+		featureChosenSq := mapSquareForNN(chosenSquare, flipY)
+		subBin[23*planeSize+featureChosenSq] = 1.0
 	}
 
 	// Global 0: nextPlayer == Black (KataGo P_WHITE)
@@ -449,7 +456,8 @@ func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, c
 
 	// Plane 24: resultsBeforeNN.myOnlyLoc
 	if results.myOnlyLoc >= 0 && results.myOnlyLoc < planeSize {
-		subBin[24*planeSize+results.myOnlyLoc] = 1.0
+		featureOnlySq := mapSquareForNN(results.myOnlyLoc, flipY)
+		subBin[24*planeSize+featureOnlySq] = 1.0
 	} else if results.myOnlyPass {
 		// Global 6: resultsBeforeNN.myOnlyLoc == PASS_LOC
 		subGlobal[6] = 1.0
@@ -575,6 +583,26 @@ func postProcessPolicy(raw []float32, legalMask *[PolicySize]bool, legalCount in
 			out[i] = -1.0
 		}
 	}
+	return out
+}
+
+func mapSquareForNN(sq int, flipY bool) int {
+	if !flipY {
+		return sq
+	}
+	r := sq / BoardSize
+	c := sq % BoardSize
+	rr := BoardSize - 1 - r
+	return rr*BoardSize + c
+}
+
+func unflipPolicyY(raw []float32) []float32 {
+	out := make([]float32, PolicySize)
+	for sq := 0; sq < BoardSize*BoardSize; sq++ {
+		out[sq] = raw[mapSquareForNN(sq, true)]
+	}
+	// pass move
+	out[PolicySize-1] = raw[PolicySize-1]
 	return out
 }
 
