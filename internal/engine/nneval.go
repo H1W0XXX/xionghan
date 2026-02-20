@@ -25,6 +25,19 @@ const (
 	BatchTimeout       = 1 * time.Millisecond
 )
 
+const (
+	resultWinnerUnknown = iota
+	resultWinnerDraw
+	resultWinnerNext
+	resultWinnerOpp
+)
+
+type resultsBeforeNN struct {
+	winnerClass int
+	myOnlyLoc   int
+	myOnlyPass  bool
+}
+
 type evalRequest struct {
 	pos          *xionghan.Position
 	stage        int
@@ -397,23 +410,74 @@ func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, c
 	// Global 1: Stage (0 = choose, 1 = place)
 	subGlobal[1] = float32(stage)
 
+	results := computeResultsBeforeNN(pos, stage, chosenSquare)
+
 	// Global 2: resultsBeforeNN.inited
 	subGlobal[2] = 1.0
 
-	// Global 3: resultsBeforeNN.winner == C_EMPTY (1.0 means game is ongoing)
-	subGlobal[3] = 1.0
+	// Global 3: resultsBeforeNN.winner == C_EMPTY (draw)
+	if results.winnerClass == resultWinnerDraw {
+		subGlobal[3] = 1.0
+	}
 
 	// Global 4: resultsBeforeNN.winner == nextPlayer
-	subGlobal[4] = 0.0
+	if results.winnerClass == resultWinnerNext {
+		subGlobal[4] = 1.0
+	}
 
 	// Global 5: resultsBeforeNN.winner == oppPlayer
-	subGlobal[5] = 0.0
+	if results.winnerClass == resultWinnerOpp {
+		subGlobal[5] = 1.0
+	}
+
+	// Plane 24: resultsBeforeNN.myOnlyLoc
+	if results.myOnlyLoc >= 0 && results.myOnlyLoc < planeSize {
+		subBin[24*planeSize+results.myOnlyLoc] = 1.0
+	} else if results.myOnlyPass {
+		// Global 6: resultsBeforeNN.myOnlyLoc == PASS_LOC
+		subGlobal[6] = 1.0
+	}
 
 	// Global 7, 8: Parity for asymmetrical boards (though here 13x13 is symmetric)
 	if BoardSize%2 != 0 {
 		subGlobal[7] = 1.0
 		subGlobal[8] = 1.0
 	}
+}
+
+func computeResultsBeforeNN(pos *xionghan.Position, stage int, chosenSquare int) resultsBeforeNN {
+	out := resultsBeforeNN{
+		winnerClass: resultWinnerUnknown,
+		myOnlyLoc:   -1,
+		myOnlyPass:  false,
+	}
+
+	legalMoves := pos.GenerateLegalMoves(false)
+	legalCount := 0
+
+	if stage == 0 {
+		var seenFrom [xionghan.NumSquares]bool
+		for _, mv := range legalMoves {
+			if mv.From >= 0 && mv.From < xionghan.NumSquares && !seenFrom[mv.From] {
+				seenFrom[mv.From] = true
+				legalCount++
+			}
+		}
+	} else if stage == 1 {
+		for _, mv := range legalMoves {
+			if mv.From == chosenSquare {
+				legalCount++
+			}
+		}
+	}
+
+	// Match C++ ResultsBeforeNN::init semantics:
+	// only when choose-stage has no legal move, mark opponent as winner.
+	if stage == 0 && legalCount == 0 {
+		out.winnerClass = resultWinnerOpp
+	}
+
+	return out
 }
 
 func (n *NNEvaluator) clearBatchTail(startIdx int) {
