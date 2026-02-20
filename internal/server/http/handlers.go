@@ -243,6 +243,22 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 	// ===== 3. 调用搜索，只思考不落子 =====
 	res := aiEngine.Search(pos, cfg)
 
+	// NN 推理失败：本次请求直接失败，不落子不换边。
+	if res.NNFailed {
+		resp := AiMoveResponse{
+			BestMove: MoveDTO{From: -1, To: -1},
+			Score:    res.Score,
+			Depth:    res.Depth,
+			Nodes:    res.Nodes,
+			TimeMs:   res.TimeUsed.Milliseconds(),
+			Position: pos.Encode(),
+			ToMove:   sideToInt(pos.SideToMove),
+			Status:   "nn_error",
+		}
+		writeJSON(w, resp)
+		return
+	}
+
 	// 没有走法
 	if res.BestMove.From == 0 && res.BestMove.To == 0 {
 		resp := AiMoveResponse{

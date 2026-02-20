@@ -72,10 +72,6 @@ func (e *Engine) computeBlunderPrune(pos *xionghan.Position, mv xionghan.Move) b
 		return false
 	}
 
-	if !isInEnemyHalf(moving.Side(), mv.To/xionghan.Cols) {
-		return false
-	}
-
 	nextPos, ok := pos.ApplyMove(mv)
 	if !ok {
 		return false
@@ -162,16 +158,6 @@ func isBlunderFilterPiece(pt xionghan.PieceType) bool {
 	default:
 		return false
 	}
-}
-
-func isInEnemyHalf(side xionghan.Side, row int) bool {
-	if side == xionghan.Red {
-		return row < xionghan.WallRow
-	}
-	if side == xionghan.Black {
-		return row > xionghan.WallRow
-	}
-	return false
 }
 
 func blunderMoveKey(pos *xionghan.Position, mv xionghan.Move) uint64 {

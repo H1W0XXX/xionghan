@@ -32,6 +32,7 @@ type SearchResult struct {
 	Nodes    int64           // 节点数
 	TimeUsed time.Duration   // 花费时间
 	PV       []xionghan.Move // 主变（这里只放了根节点的最佳着法，其它你以后可以扩展）
+	NNFailed bool            // 搜索期间 NN 推理是否失败
 }
 
 // 从红方视角的评价：正数红方好，负数黑方好
@@ -55,13 +56,16 @@ func Evaluate(pos *xionghan.Position) int {
 func (e *Engine) eval(pos *xionghan.Position) int {
 	if e.UseNN && e.nn != nil {
 		res, err := e.nn.Evaluate(pos)
-		if err == nil {
+		if err == nil && res != nil {
 			// 将胜率/分数转换为整数分。
 			// NN 输出 winProb 是 P_WHITE (Black) 的胜率，lossProb 是 P_BLACK (Red) 的胜率。
 			// 搜索视角是 Red 为正，所以 score = RedWinProb - BlackWinProb
 			winLoss := res.LossProb - res.WinProb
 			return int(winLoss * 10000)
 		}
+		// 不回退手工评估：标记 NN 故障并中止本次搜索。
+		e.markNNFailure()
+		return 0
 	}
 	return Evaluate(pos)
 }
@@ -102,6 +106,8 @@ func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) [
 
 // 根节点搜索：带简单迭代加深（根节点内部并行）
 func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
+	e.resetNNAbort()
+
 	// 1. 绝杀判定：直接吃王
 	moves := pos.GenerateLegalMoves(true)
 	for _, mv := range moves {
@@ -151,10 +157,20 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	}
 
 	for depth := 1; depth <= cfg.MaxDepth; depth++ {
+		if e.hasNNFailure() {
+			bestMove = xionghan.Move{}
+			bestDepth = 0
+			break
+		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			break
 		}
 		score, move := e.alphaBetaRoot(pos, depth, -scoreInf, scoreInf, deadline)
+		if e.hasNNFailure() {
+			bestMove = xionghan.Move{}
+			bestDepth = 0
+			break
+		}
 		if move.From == 0 && move.To == 0 {
 			// 搜不到有效着法（可能是无子可动）
 			break
@@ -174,7 +190,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	}
 	// UI label is "Red Win %". Prefer root NN red-win probability (fixed color view)
 	// to avoid shallow minimax max/min amplification that can look overly extreme.
-	if e.UseNN && e.nn != nil {
+	if e.UseNN && e.nn != nil && !e.hasNNFailure() {
 		if root, err := e.nn.Evaluate(pos); err == nil {
 			winProb = root.LossProb // fixed red win prob
 		}
@@ -188,11 +204,16 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		Nodes:    atomic.LoadInt64(&e.nodes),
 		TimeUsed: time.Since(start),
 		PV:       []xionghan.Move{bestMove},
+		NNFailed: e.hasNNFailure(),
 	}
 }
 
 // 根节点：根据 SideToMove 决定是 max 还是 min，并行搜索每个着法
 func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) (int, xionghan.Move) {
+	if e.hasNNFailure() {
+		return 0, xionghan.Move{}
+	}
+
 	moves := pos.GenerateLegalMoves(true)
 	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
@@ -205,7 +226,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	if e.UseNN && e.nn != nil {
 		// Stage 0: 获取 From 概率
 		res0, err := e.nn.EvaluateWithStage(pos, 0, -1)
-		if err == nil {
+		if err == nil && res0 != nil {
 			// 为了效率，我们将 From 位置相同的招法分组，并对每组调用一次 Stage 1
 			fromGroups := make(map[int][]int) // From -> indices in moves
 			for i, mv := range moves {
@@ -221,16 +242,14 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			for from, indices := range fromGroups {
 				// Stage 1: 为该选定的棋子获取 To 概率
 				res1, err := e.nn.EvaluateWithStage(pos, 1, from)
+				if err != nil || res1 == nil {
+					e.markNNFailure()
+					return 0, xionghan.Move{}
+				}
 				fromProb := res0.Policy[from]
-				if err == nil {
-					for _, idx := range indices {
-						toProb := res1.Policy[moves[idx].To]
-						scores[idx] = moveScore{idx: idx, prob: fromProb * toProb}
-					}
-				} else {
-					for _, idx := range indices {
-						scores[idx] = moveScore{idx: idx, prob: fromProb * 0.001}
-					}
+				for _, idx := range indices {
+					toProb := res1.Policy[moves[idx].To]
+					scores[idx] = moveScore{idx: idx, prob: fromProb * toProb}
 				}
 			}
 
@@ -246,6 +265,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				sortedMoves[i] = moves[sc.idx]
 			}
 			copy(moves, sortedMoves)
+		} else {
+			e.markNNFailure()
+			return 0, xionghan.Move{}
 		}
 	} else {
 		// 没有 NN 时，把吃子招提前一点
@@ -293,6 +315,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			blunderReplyTT: make(map[uint64]uint8, 1<<13),
 			nn:             e.nn,
 			UseNN:          e.UseNN,
+			nnAbort:        e.nnAbort,
 		}
 		score := local.alphaBeta(children[0].child, depth-1, alpha, beta, deadline)
 		if local.nodes != 0 {
@@ -322,6 +345,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				blunderReplyTT: make(map[uint64]uint8, 1<<13),
 				nn:             e.nn,
 				UseNN:          e.UseNN,
+				nnAbort:        e.nnAbort,
 			}
 			score := local.alphaBeta(ch.child, depth-1, alpha, beta, deadline)
 			if local.nodes != 0 {
@@ -366,6 +390,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			}
 		}
 	}
+	if e.hasNNFailure() {
+		return 0, xionghan.Move{}
+	}
 
 	if bestMove.From == 0 && bestMove.To == 0 {
 		// 理论上不会走到这里，兜底一下
@@ -380,6 +407,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 // 内部递归：标准 alpha-beta（在并行版本里由每个局部 Engine 独享调用）
 func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) int {
 	e.nodes++
+	if e.hasNNFailure() {
+		return 0
+	}
 
 	if depth <= 0 {
 		return e.eval(pos)
@@ -448,6 +478,9 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 				continue
 			}
 			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
+			if e.hasNNFailure() {
+				return 0
+			}
 			if score > bestScore {
 				bestScore = score
 				bestMove = moves[i]
@@ -467,6 +500,9 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 				continue
 			}
 			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
+			if e.hasNNFailure() {
+				return 0
+			}
 			if score < bestScore {
 				bestScore = score
 				bestMove = moves[i]

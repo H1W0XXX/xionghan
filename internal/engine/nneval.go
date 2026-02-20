@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -42,7 +43,12 @@ type evalRequest struct {
 	pos          *xionghan.Position
 	stage        int
 	chosenSquare int
-	result       chan *NNResult
+	result       chan evalResponse
+}
+
+type evalResponse struct {
+	res *NNResult
+	err error
 }
 
 type NNResult struct {
@@ -257,9 +263,16 @@ func (n *NNEvaluator) Evaluate(pos *xionghan.Position) (*NNResult, error) {
 }
 
 func (n *NNEvaluator) EvaluateWithStage(pos *xionghan.Position, stage int, chosenSquare int) (*NNResult, error) {
-	resChan := make(chan *NNResult, 1)
+	resChan := make(chan evalResponse, 1)
 	n.queue <- evalRequest{pos: pos, stage: stage, chosenSquare: chosenSquare, result: resChan}
-	return <-resChan, nil
+	resp := <-resChan
+	if resp.err != nil {
+		return nil, resp.err
+	}
+	if resp.res == nil {
+		return nil, errors.New("nn evaluator returned empty result")
+	}
+	return resp.res, nil
 }
 
 func (n *NNEvaluator) batchLoop() {
@@ -306,9 +319,9 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	err := n.session.Run()
 	if err != nil {
 		fmt.Printf("CRITICAL: NN Session Run Error: %v\n", err)
-		// Return error to all waiting requests
+		// Return error to all waiting requests.
 		for _, req := range requests {
-			req.result <- nil
+			req.result <- evalResponse{err: err}
 		}
 		return
 	}
@@ -365,7 +378,7 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 		}
 		legalMask, legalCount := buildPolicyLegalMask(req.pos, req.stage, req.chosenSquare)
 		res.Policy = postProcessPolicy(policyForBoard, &legalMask, legalCount)
-		req.result <- res
+		req.result <- evalResponse{res: res}
 	}
 
 	if n.totalBatches%500 == 0 {
