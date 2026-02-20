@@ -194,6 +194,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 // 根节点：根据 SideToMove 决定是 max 还是 min，并行搜索每个着法
 func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) (int, xionghan.Move) {
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
 		// 没招就直接返回静态评估
@@ -233,9 +234,18 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				}
 			}
 
-			sort.SliceStable(moves, func(i, j int) bool {
+			// IMPORTANT:
+			// Do not sort `moves` directly by `scores[i]`, because indices in the
+			// comparator are positions *during sorting*, while `scores` is indexed
+			// by original move order. That would decouple move/prob pairing.
+			sort.SliceStable(scores, func(i, j int) bool {
 				return scores[i].prob > scores[j].prob
 			})
+			sortedMoves := make([]xionghan.Move, len(moves))
+			for i, sc := range scores {
+				sortedMoves[i] = moves[sc.idx]
+			}
+			copy(moves, sortedMoves)
 		}
 	} else {
 		// 没有 NN 时，把吃子招提前一点
@@ -278,9 +288,11 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	// 只有一个着法时没必要并行，直接用局部 Engine 跑一次
 	if len(children) == 1 {
 		local := &Engine{
-			tt:    make(map[uint64]ttEntry, 1<<14),
-			nn:    e.nn,
-			UseNN: e.UseNN,
+			tt:             make(map[uint64]ttEntry, 1<<14),
+			blunderTT:      make(map[uint64]uint8, 1<<13),
+			blunderReplyTT: make(map[uint64]uint8, 1<<13),
+			nn:             e.nn,
+			UseNN:          e.UseNN,
 		}
 		score := local.alphaBeta(children[0].child, depth-1, alpha, beta, deadline)
 		if local.nodes != 0 {
@@ -305,9 +317,11 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 		go func() {
 			// 每个 goroutine 用自己的 Engine/TT，避免加锁和 map 竞争
 			local := &Engine{
-				tt:    make(map[uint64]ttEntry, 1<<14),
-				nn:    e.nn,
-				UseNN: e.UseNN,
+				tt:             make(map[uint64]ttEntry, 1<<14),
+				blunderTT:      make(map[uint64]uint8, 1<<13),
+				blunderReplyTT: make(map[uint64]uint8, 1<<13),
+				nn:             e.nn,
+				UseNN:          e.UseNN,
 			}
 			score := local.alphaBeta(ch.child, depth-1, alpha, beta, deadline)
 			if local.nodes != 0 {
@@ -406,6 +420,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 	}
 
 	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
 		// 没招，简单直接评估（以后可以做将死检测）
