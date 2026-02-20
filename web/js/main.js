@@ -44,6 +44,7 @@ let selectedSq = null;
 let movesFromSelected = []; // 当前选中棋子对应的所有可走棋（子集）
 let currentFen = ""; // ✅ 当前局面的 FEN 字符串（直接用后端给的）
 let lastMove = null; // 上一步走子 {from, to}
+let moveCount = 0; // 当前对局累计步数（人类+AI）
 
 
 // ====== Cookie 工具（session cookie：不设 expires 就会在关闭浏览器时清空） ======
@@ -67,6 +68,33 @@ function deleteCookie(name) {
     document.cookie = `${encodeURIComponent(name)}=; path=/; max-age=0`;
 }
 
+function updateMoveCountUI() {
+    const moveCountEl = document.getElementById("moveCount");
+    if (moveCountEl) moveCountEl.innerText = String(moveCount);
+}
+
+function loadMoveCountFromSession() {
+    const cookieGameId = getCookie("xionghan_move_count_game_id");
+    const cookieMoveCount = parseInt(getCookie("xionghan_move_count") || "", 10);
+    if (cookieGameId === gameId && Number.isFinite(cookieMoveCount) && cookieMoveCount >= 0) {
+        moveCount = cookieMoveCount;
+    } else {
+        moveCount = 0;
+    }
+    updateMoveCountUI();
+}
+
+function saveMoveCountToSession() {
+    if (!gameId) return;
+    setSessionCookie("xionghan_move_count_game_id", gameId);
+    setSessionCookie("xionghan_move_count", String(moveCount));
+}
+
+function resetMoveCount() {
+    moveCount = 0;
+    updateMoveCountUI();
+    saveMoveCountToSession();
+}
 
 
 // ====== FEN 解析（对应后端 fen.go 的 Encode） ======
@@ -394,6 +422,7 @@ async function tryResumeGame() {
         selectedSq = null;
         movesFromSelected = [];
         lastMove = null;
+        loadMoveCountFromSession();
         renderBoard();
     } catch (e) {
         console.error("resume error, start new game", e);
@@ -423,6 +452,7 @@ async function newGame() {
         selectedSq = null;
         movesFromSelected = [];
         lastMove = null;
+        resetMoveCount();
         renderBoard();
     } catch (e) {
         console.error("new_game error", e);
@@ -452,6 +482,9 @@ async function playMove(mv) {
         selectedSq = null;
         movesFromSelected = [];
         lastMove = mv; // 记录上一步走子
+        moveCount += 1;
+        saveMoveCountToSession();
+        updateMoveCountUI();
         renderBoard(mv);
         // 你可以看 data.status 判断是否将死/和棋
     } catch (e) {
