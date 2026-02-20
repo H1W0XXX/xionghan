@@ -239,6 +239,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 
 	moves := pos.GenerateLegalMoves(true)
 	moves = e.FilterLeiLockedMoves(pos, moves)
+	moves = e.FilterUrgentPawnThreatMoves(pos, moves)
 	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
@@ -310,6 +311,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			}
 		}
 	}
+	orderMovesByTacticalPriority(pos, moves)
 
 	// 先同步生成所有子局面，避免并发操作 pos
 	type childNode struct {
@@ -478,6 +480,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 
 	moves := pos.GenerateLegalMoves(true)
 	moves = e.FilterLeiLockedMoves(pos, moves)
+	moves = e.FilterUrgentPawnThreatMoves(pos, moves)
 	moves = e.FilterBlunderMoves(pos, moves)
 	moves = e.FilterVCFMoves(pos, moves)
 	if len(moves) == 0 {
@@ -495,6 +498,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			}
 		}
 	}
+	orderMovesByTacticalPriority(pos, moves)
 
 	var bestScore int
 	bestMove := xionghan.Move{}
@@ -575,5 +579,95 @@ func orderMovesByCaptureFirst(pos *xionghan.Position, moves []xionghan.Move) {
 				}
 			}
 		}
+	}
+}
+
+// 战术优先排序：
+// 1) 优先搜索“移走被对方兵盯住的己方车/檑/炮/马”。
+// 2) 其次优先搜索“吃到对方车/檑/炮/马”。
+// 同类内部顺序：车 > 檑 > 炮 > 马。
+func orderMovesByTacticalPriority(pos *xionghan.Position, moves []xionghan.Move) {
+	if len(moves) <= 1 {
+		return
+	}
+
+	side := pos.SideToMove
+	opp := oppositeSide(side)
+	type movePriority struct {
+		evacuate     bool
+		evacuateRank int
+		captureCore  bool
+		captureRank  int
+	}
+	type moveOrderItem struct {
+		mv xionghan.Move
+		pr movePriority
+	}
+	items := make([]moveOrderItem, len(moves))
+	hasPriority := false
+
+	for i, mv := range moves {
+		items[i].mv = mv
+		moving := pos.Board.Squares[mv.From]
+		if moving != 0 && moving.Side() == side {
+			if pieceRank := tacticalPriorityRank(moving.Type()); pieceRank > 0 {
+				if pos.IsAttackedByPawn(mv.From, opp) {
+					items[i].pr.evacuate = true
+					items[i].pr.evacuateRank = pieceRank
+				}
+			}
+		}
+
+		target := pos.Board.Squares[mv.To]
+		if target != 0 && target.Side() == opp {
+			if pieceRank := tacticalPriorityRank(target.Type()); pieceRank > 0 {
+				items[i].pr.captureCore = true
+				items[i].pr.captureRank = pieceRank
+			}
+		}
+
+		if items[i].pr.evacuate || items[i].pr.captureCore {
+			hasPriority = true
+		}
+	}
+
+	if !hasPriority {
+		return
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		pi := items[i].pr
+		pj := items[j].pr
+		if pi.evacuate != pj.evacuate {
+			return pi.evacuate
+		}
+		if pi.evacuate && pi.evacuateRank != pj.evacuateRank {
+			return pi.evacuateRank > pj.evacuateRank
+		}
+		if pi.captureCore != pj.captureCore {
+			return pi.captureCore
+		}
+		if pi.captureCore && pi.captureRank != pj.captureRank {
+			return pi.captureRank > pj.captureRank
+		}
+		return false
+	})
+	for i := range moves {
+		moves[i] = items[i].mv
+	}
+}
+
+func tacticalPriorityRank(pt xionghan.PieceType) int {
+	switch pt {
+	case xionghan.PieceRook:
+		return 4
+	case xionghan.PieceLei:
+		return 3
+	case xionghan.PieceCannon:
+		return 2
+	case xionghan.PieceKnight:
+		return 1
+	default:
+		return 0
 	}
 }
