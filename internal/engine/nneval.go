@@ -112,7 +112,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	setNativeEnv("ORT_TENSORRT_TIMING_CACHE_PATH", absCachePath)
 	setNativeEnv("ORT_TENSORRT_FP16_ENABLE", "1")
 	setNativeEnv("ORT_TENSORRT_MAX_WORKSPACE_SIZE", "2147483648")
-	
+
 	// Set logging level to Error (3) to suppress fallback warnings
 	setNativeEnv("ORT_LOGGING_LEVEL", "3")
 
@@ -149,7 +149,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	outputs := []ort.Value{outputTensor1, outputTensor2}
 
 	var session *ort.AdvancedSession
-	
+
 	providers := []struct {
 		name  string
 		setup func(*ort.SessionOptions) error
@@ -190,7 +190,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 		log.Printf("NN: Attempting to initialize with %s...%s", p.name, ansiReset)
 		so, _ := ort.NewSessionOptions()
 		_ = so.SetLogSeverityLevel(3)
-		
+
 		if err := p.setup(so); err != nil {
 			log.Printf("NN: %s setup failed: %v%s", p.name, err, ansiReset)
 			so.Destroy()
@@ -241,9 +241,15 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 }
 
 func (n *NNEvaluator) Close() {
-	if n.session != nil { n.session.Destroy() }
-	for _, v := range n.inputs { v.Destroy() }
-	for _, v := range n.outputs { v.Destroy() }
+	if n.session != nil {
+		n.session.Destroy()
+	}
+	for _, v := range n.inputs {
+		v.Destroy()
+	}
+	for _, v := range n.outputs {
+		v.Destroy()
+	}
 }
 
 func (n *NNEvaluator) Evaluate(pos *xionghan.Position) (*NNResult, error) {
@@ -261,7 +267,9 @@ func (n *NNEvaluator) batchLoop() {
 	for {
 		requests = requests[:0]
 		req, ok := <-n.queue
-		if !ok { return }
+		if !ok {
+			return
+		}
 		requests = append(requests, req)
 
 		timeout := time.After(BatchTimeout)
@@ -300,7 +308,7 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 		fmt.Printf("CRITICAL: NN Session Run Error: %v\n", err)
 		// Return error to all waiting requests
 		for _, req := range requests {
-			req.result <- nil 
+			req.result <- nil
 		}
 		return
 	}
@@ -313,11 +321,15 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	for i, req := range requests {
 		// Value head raw logits.
 		v := n.value[i*3 : i*3+3]
-		
+
 		maxLogit := v[0]
-		if v[1] > maxLogit { maxLogit = v[1] }
-		if v[2] > maxLogit { maxLogit = v[2] }
-		
+		if v[1] > maxLogit {
+			maxLogit = v[1]
+		}
+		if v[2] > maxLogit {
+			maxLogit = v[2]
+		}
+
 		e0 := math.Exp(float64(v[0] - maxLogit))
 		e1 := math.Exp(float64(v[1] - maxLogit))
 		e2 := math.Exp(float64(v[2] - maxLogit))
@@ -342,17 +354,18 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 		}
 
 		res := &NNResult{
-			Policy:   make([]float32, PolicySize),
 			WinProb:  blackWin,
 			LossProb: redWin,
 			Score:    redWin - blackWin,
 		}
-		copy(res.Policy, n.policy[i*PolicySize:(i+1)*PolicySize])
+		rawPolicy := n.policy[i*PolicySize : (i+1)*PolicySize]
+		legalMask, legalCount := buildPolicyLegalMask(req.pos, req.stage, req.chosenSquare)
+		res.Policy = postProcessPolicy(rawPolicy, &legalMask, legalCount)
 		req.result <- res
 	}
 
 	if n.totalBatches%500 == 0 {
-		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample ValueLogit0=%.4f\n", 
+		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample ValueLogit0=%.4f\n",
 			float64(n.totalItems)/float64(n.totalBatches), n.value[0])
 	}
 }
@@ -363,9 +376,13 @@ func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, c
 	globalOffset := batchIdx * NumGlobalFeatures
 
 	subBin := n.binInput[spatialOffset : spatialOffset+NumSpatialFeatures*planeSize]
-	for i := range subBin { subBin[i] = 0 }
+	for i := range subBin {
+		subBin[i] = 0
+	}
 	subGlobal := n.globalInput[globalOffset : globalOffset+NumGlobalFeatures]
-	for i := range subGlobal { subGlobal[i] = 0 }
+	for i := range subGlobal {
+		subGlobal[i] = 0
+	}
 
 	pla := pos.SideToMove
 
@@ -480,8 +497,93 @@ func computeResultsBeforeNN(pos *xionghan.Position, stage int, chosenSquare int)
 	return out
 }
 
+func buildPolicyLegalMask(pos *xionghan.Position, stage int, chosenSquare int) ([PolicySize]bool, int) {
+	var mask [PolicySize]bool
+	legalCount := 0
+
+	legalMoves := pos.GenerateLegalMoves(false)
+	if stage == 0 {
+		var seenFrom [xionghan.NumSquares]bool
+		for _, mv := range legalMoves {
+			if mv.From >= 0 && mv.From < xionghan.NumSquares && !seenFrom[mv.From] {
+				seenFrom[mv.From] = true
+				mask[mv.From] = true
+				legalCount++
+			}
+		}
+	} else if stage == 1 {
+		for _, mv := range legalMoves {
+			if mv.From == chosenSquare && mv.To >= 0 && mv.To < xionghan.NumSquares && !mask[mv.To] {
+				mask[mv.To] = true
+				legalCount++
+			}
+		}
+	}
+
+	return mask, legalCount
+}
+
+func postProcessPolicy(raw []float32, legalMask *[PolicySize]bool, legalCount int) []float32 {
+	out := make([]float32, PolicySize)
+
+	if legalCount <= 0 {
+		for i := range out {
+			out[i] = -1.0
+		}
+		return out
+	}
+
+	maxPolicy := math.Inf(-1)
+	for i := 0; i < PolicySize; i++ {
+		if (*legalMask)[i] {
+			v := float64(raw[i])
+			if v > maxPolicy {
+				maxPolicy = v
+			}
+		} else {
+			out[i] = -1.0
+		}
+	}
+
+	policySum := 0.0
+	for i := 0; i < PolicySize; i++ {
+		if !(*legalMask)[i] {
+			continue
+		}
+		v := math.Exp(float64(raw[i]) - maxPolicy)
+		out[i] = float32(v)
+		policySum += v
+	}
+
+	if math.IsNaN(policySum) || math.IsInf(policySum, 0) || policySum <= 0 {
+		uniform := float32(1.0 / float64(legalCount))
+		for i := 0; i < PolicySize; i++ {
+			if (*legalMask)[i] {
+				out[i] = uniform
+			} else {
+				out[i] = -1.0
+			}
+		}
+		return out
+	}
+
+	invSum := float32(1.0 / policySum)
+	for i := 0; i < PolicySize; i++ {
+		if (*legalMask)[i] {
+			out[i] *= invSum
+		} else {
+			out[i] = -1.0
+		}
+	}
+	return out
+}
+
 func (n *NNEvaluator) clearBatchTail(startIdx int) {
 	spatialSize := NumSpatialFeatures * BoardSize * BoardSize
-	for i := startIdx * spatialSize; i < MaxBatchSize*spatialSize; i++ { n.binInput[i] = 0 }
-	for i := startIdx * NumGlobalFeatures; i < MaxBatchSize*NumGlobalFeatures; i++ { n.globalInput[i] = 0 }
+	for i := startIdx * spatialSize; i < MaxBatchSize*spatialSize; i++ {
+		n.binInput[i] = 0
+	}
+	for i := startIdx * NumGlobalFeatures; i < MaxBatchSize*NumGlobalFeatures; i++ {
+		n.globalInput[i] = 0
+	}
 }
