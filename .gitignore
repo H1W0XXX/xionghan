@@ -56,3 +56,12 @@ Thumbs.db
 
 
 新建文本文档.txt
+
+# Local remote-build helper scripts
+/build_once.sh
+/Sync-Xionghan-Go.ps1
+
+# Local packaging artifacts
+/xionghan-darwin-arm64
+/xionghan-darwin-arm64.tar.gz
+/mac_read_me.txt

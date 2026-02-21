@@ -7,11 +7,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 	"xionghan/internal/xionghan"
 
 	ort "github.com/yalue/onnxruntime_go"
@@ -79,11 +76,6 @@ type NNEvaluator struct {
 	totalBatches int64
 }
 
-var (
-	modkernel32 = syscall.NewLazyDLL("kernel32.dll")
-	procSetEnv  = modkernel32.NewProc("SetEnvironmentVariableW")
-)
-
 const ansiReset = "\033[0m"
 
 func init() {
@@ -91,17 +83,16 @@ func init() {
 	log.SetOutput(os.Stdout)
 }
 
-func setWinEnv(key, value string) {
-	k, _ := syscall.UTF16PtrFromString(key)
-	v, _ := syscall.UTF16PtrFromString(value)
-	_, _, _ = procSetEnv.Call(uintptr(unsafe.Pointer(k)), uintptr(unsafe.Pointer(v)))
-}
-
-func setNativeEnv(key, value string) {
-	os.Setenv(key, value)
-	if runtime.GOOS == "windows" {
-		setWinEnv(key, value)
+func prependPathEnv(key, value string) {
+	if value == "" {
+		return
 	}
+	old := os.Getenv(key)
+	if old == "" {
+		setNativeEnv(key, value)
+		return
+	}
+	setNativeEnv(key, value+string(os.PathListSeparator)+old)
 }
 
 func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
@@ -125,14 +116,21 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	setNativeEnv("ORT_LOGGING_LEVEL", "3")
 
 	if !ort.IsInitialized() {
-		absLibPath, _ := filepath.Abs(libPath)
+		absLibPath, err := resolveORTSharedLibraryPath(libPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve onnxruntime shared library path: %w", err)
+		}
+
 		// Ensure lib dir is in PATH for dependencies
 		libDir := filepath.Dir(absLibPath)
-		pathEnv := os.Getenv("PATH")
-		setNativeEnv("PATH", libDir+string(os.PathListSeparator)+pathEnv)
+		prependPathEnv("PATH", libDir)
+		configureORTSearchPath(libDir)
 
 		ort.SetSharedLibraryPath(absLibPath)
-		ort.InitializeEnvironment()
+		if err := ort.InitializeEnvironment(); err != nil {
+			return nil, fmt.Errorf("initialize onnxruntime environment with %s: %w", absLibPath, err)
+		}
+		log.Printf("NN: ONNX Runtime shared library: %s%s", absLibPath, ansiReset)
 		fmt.Print(ansiReset) // 强行重置可能由 ORT 产生的颜色码
 	}
 
