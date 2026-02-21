@@ -166,6 +166,11 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 		name  string
 		setup func(*ort.SessionOptions) error
 	}{
+		{"XNNPACK", func(so *ort.SessionOptions) error {
+			return so.AppendExecutionProviderXNNPACK(map[string]string{
+				"intra_op_num_threads": "4",
+			})
+		}},
 		{"TensorRT", func(so *ort.SessionOptions) error {
 			trtOpts, e := ort.NewTensorRTProviderOptions()
 			if e != nil {

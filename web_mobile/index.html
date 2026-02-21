@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>匈汉象棋</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+        * {
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #222;
+            color: #eee;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            align-items: center;
+            padding: 10px;
+            width: 100vw;
+            box-sizing: border-box;
+        }
+        #app {
+            width: min(95vw, 600px);
+            aspect-ratio: 1;
+        }
+        #boardSvg {
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #sidebar {
+            width: min(95vw, 600px);
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .stat-box {
+            background: #333;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: #aaa;
+            margin-bottom: 2px;
+        }
+        .stat-value {
+            font-size: 16px;
+            font-weight: bold;
+        }
+        button {
+            padding: 12px;
+            background: #4a6;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            grid-column: span 2;
+        }
+        button:hover {
+            background: #5b7;
+        }
+        .win-bar {
+            height: 10px;
+            background: #111;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        #winBarFill {
+            height: 100%;
+            background: #c33;
+            width: 50%;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+<!-- 把棋盘 SVG 符号藏在这里 -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none;">
+    <!-- 你的原始 symbol，一字不改，只是搬进来 -->
+    <symbol id="board-xionghan">
+        <rect width="100%" height="100%" fill="bisque"/>
+        <path stroke="#222" stroke-width="12" fill="none" d="M30 30h1240v1240H30z"/>
+        <g stroke="#000" stroke-width="3">
+            <path d="M50 50h1200M50 150h1200M50 250h1200M50 350h1200M50 450h1200M50 550h1200M50 650h1200M50 750h1200M50 850h1200M50 950h1200M50 1050h1200M50 1150h1200M50 1250h1200M50 50v1200M150 50v1200M250 50v1200M350 50v1200M450 50v1200M550 50v1200M650 50v1200M750 50v1200M850 50v1200M950 50v1200M1050 50v1200M1150 50v1200M1250 50v1200"/>
+        </g>
+        <g fill="bisque">
+            <path d="M52 552h1196v48H52zM52 698h1196v48H52z"/>
+        </g>
+        <g stroke="#000" stroke-width="2">
+            <path d="M550 150l200 200M750 150L550 350M550 950l200 200M750 950l-200 200"/>
+        </g>
+        <g stroke="#000" stroke-width="3" fill="bisque">
+            <circle cx="50" cy="550" r="10"/><circle cx="250" cy="550" r="6"/><circle cx="450" cy="550" r="10"/><circle cx="650" cy="550" r="6"/><circle cx="850" cy="550" r="10"/><circle cx="1050" cy="550" r="6"/><circle cx="1250" cy="550" r="10"/><circle cx="50" cy="750" r="10"/><circle cx="250" cy="750" r="6"/><circle cx="450" cy="750" r="10"/><circle cx="650" cy="750" r="6"/><circle cx="850" cy="750" r="10"/><circle cx="1050" cy="750" r="6"/><circle cx="1250" cy="750" r="10"/>
+        </g>
+        <circle cx="50" cy="150" r="7"/><circle cx="450" cy="150" r="7"/><circle cx="850" cy="150" r="7"/><circle cx="1250" cy="150" r="7"/><circle cx="250" cy="350" r="7"/><circle cx="650" cy="350" r="7"/><circle cx="1050" cy="350" r="7"/><circle cx="50" cy="550" r="7"/><circle cx="450" cy="550" r="7"/><circle cx="850" cy="550" r="7"/><circle cx="1250" cy="550" r="7"/><circle cx="50" cy="750" r="7"/><circle cx="450" cy="750" r="7"/><circle cx="850" cy="750" r="7"/><circle cx="1250" cy="750" r="7"/><circle cx="250" cy="950" r="7"/><circle cx="650" cy="950" r="7"/><circle cx="1050" cy="950" r="7"/><circle cx="50" cy="1150" r="7"/><circle cx="450" cy="1150" r="7"/><circle cx="850" cy="1150" r="7"/><circle cx="1250" cy="1150" r="7"/>
+        <g stroke="#000" stroke-width="2" stroke-dasharray="0 42.42 14.14 28.28 14.14 42.42">
+            <path d="M50 50l1200 1200M50 1250L1250 50M50 650L650 50M50 650l600 600M1250 650L650 50M1250 650l-600 600"/>
+        </g>
+        <g stroke="#000" stroke-width="5" fill="none">
+            <path d="M58 70V58h12M658 70V58h12M358 370v-12h12M958 370v-12h12M58 670v-12h12M658 670v-12h12M358 970v-12h12M958 970v-12h12M642 70V58h-12M1242 70V58h-12M342 370v-12h-12M942 370v-12h-12M642 670v-12h-12M1242 670v-12h-12M342 970v-12h-12M942 970v-12h-12"/>
+            <path d="M642 70V58h-12"/>
+            <path d="M642 70V58h-12M342 330v12h-12M942 330v12h-12M642 630v12h-12M1242 630v12h-12M342 930v12h-12M942 930v12h-12M642 1230v12h-12M1242 1230v12h-12M358 330v12h12M958 330v12h12M58 630v12h12M658 630v12h12M358 930v12h12M958 930v12h12M58 1230v12h12M658 1230v12h12"/>
+        </g>
+        <g font-family="board-columns">
+            <circle cx="50" cy="650" r="12" stroke="#000" stroke-width="3" fill="bisque"/><text x="50" y="651" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle">A</text>
+            <circle cx="150" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="150" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">B</text>
+            <circle cx="250" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="250" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">C</text>
+            <circle cx="350" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="350" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">D</text>
+            <circle cx="450" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="450" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">E</text>
+            <circle cx="550" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="550" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">F</text>
+            <circle cx="650" cy="650" r="12" stroke="#000" stroke-width="3" fill="bisque"/><text x="650" y="651" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle">G</text>
+            <circle cx="750" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="750" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">H</text>
+            <circle cx="850" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="850" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">I</text>
+            <circle cx="950" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="950" y="651" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">J</text>
+            <circle cx="1050" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="1050" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">K</text>
+            <circle cx="1150" cy="650" r="15" stroke="#000" stroke-width="3" fill="bisque"/><text x="1150" y="652" font-size="18" font-weight="bold" text-anchor="middle" dominant-baseline="middle">L</text>
+            <circle cx="1250" cy="650" r="12" stroke="#000" stroke-width="3" fill="bisque"/><text x="1250" y="651" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle">M</text>
+        </g>
+    </symbol>
+</svg>
+
+<div id="container">
+    <div id="app">
+        <svg id="boardSvg"
+             viewBox="0 0 1300 1300"
+             xmlns="http://www.w3.org/2000/svg"
+             xmlns:xlink="http://www.w3.org/1999/xlink">
+            <!-- 棋盘背景 -->
+            <use href="#board-xionghan"></use>
+    
+            <!-- 棋子层先画 -->
+            <g id="piecesLayer"></g>
+    
+            <!-- 高亮层最后画，永远在最上面 -->
+            <g id="highlightLayer"></g>
+        </svg>
+    </div>
+
+    <div id="sidebar">
+        <div class="stat-box">
+            <div class="stat-label">红方胜率 (Red Win %)</div>
+            <div id="winProbText" class="stat-value">50.0%</div>
+            <div class="win-bar">
+                <div id="winBarFill"></div>
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">游戏状态 (Game Status)</div>
+            <div id="gameStatus" class="stat-value">进行中</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">已走步数 (Move Count)</div>
+            <div id="moveCount" class="stat-value">0</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">搜索深度 / 节点</div>
+            <div id="searchInfo" class="stat-value">- / -</div>
+        </div>
+        <button id="btnAiMove">AI Move</button>
+        <button id="btnNewGame" style="background: #666; margin-top: 10px;">New Game</button>
+    </div>
+</div>
+
+<script src="js/main.js"></script>
+</body>
+</html>

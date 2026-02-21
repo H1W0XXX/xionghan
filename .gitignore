@@ -65,3 +65,26 @@ zog匈汉象棋/
 /xionghan-darwin-arm64
 /xionghan-darwin-arm64.tar.gz
 /mac_read_me.txt
+
+# Android and Mobile
+*.aar
+*.apk
+*.jks
+/mobile/mobile
+/android_app/.gradle/
+/android_app/build/
+/android_app/app/build/
+/android_app/local.properties
+/android_app/app/libs/*.aar
+/android_app/app/src/main/assets/web_mobile/
+/android_app/app/src/main/assets/*.onnx
+/android_app/.idea/gradle.xml
+/android_app/.idea/libraries/
+/android_app/.idea/modules.xml
+/android_app/.idea/workspace.xml
+/android_app/.idea/caches/
+
+# Local Dev
+/onnxruntime_go_local/
+/build_android.ps1
+/export_int8.py

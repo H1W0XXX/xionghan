@@ -1,0 +1,202 @@
+<svg width="1300" height="1300" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background -->
+    <rect width="100%" height="100%" fill="bisque" />
+
+    <!-- Outer Border -->
+    <rect x="30" y="30" width="1240" height="1240" stroke="#222" stroke-width="12" fill="none" />
+
+    <!-- 棋盘线 -->
+    <g stroke="black" stroke-width="3">
+        <line x1="50" y1="50" x2="1250" y2="50" />
+        <line x1="50" y1="150" x2="1250" y2="150" />
+        <line x1="50" y1="250" x2="1250" y2="250" />
+        <line x1="50" y1="350" x2="1250" y2="350" />
+        <line x1="50" y1="450" x2="1250" y2="450" />
+        <line x1="50" y1="550" x2="1250" y2="550" />
+        <line x1="50" y1="650" x2="1250" y2="650" />
+        <line x1="50" y1="750" x2="1250" y2="750" />
+        <line x1="50" y1="850" x2="1250" y2="850" />
+        <line x1="50" y1="950" x2="1250" y2="950" />
+        <line x1="50" y1="1050" x2="1250" y2="1050" />
+        <line x1="50" y1="1150" x2="1250" y2="1150" />
+        <line x1="50" y1="1250" x2="1250" y2="1250" />
+        <line x1="50" y1="50" x2="50" y2="1250" />
+        <line x1="150" y1="50" x2="150" y2="1250" />
+        <line x1="250" y1="50" x2="250" y2="1250" />
+        <line x1="350" y1="50" x2="350" y2="1250" />
+        <line x1="450" y1="50" x2="450" y2="1250" />
+        <line x1="550" y1="50" x2="550" y2="1250" />
+        <line x1="650" y1="50" x2="650" y2="1250" />
+        <line x1="750" y1="50" x2="750" y2="1250" />
+        <line x1="850" y1="50" x2="850" y2="1250" />
+        <line x1="950" y1="50" x2="950" y2="1250" />
+        <line x1="1050" y1="50" x2="1050" y2="1250" />
+        <line x1="1150" y1="50" x2="1150" y2="1250" />
+        <line x1="1250" y1="50" x2="1250" y2="1250" />
+    </g>
+
+    <!-- 长城 -->
+    <g>
+        <rect x="52" y="552" width="1196" height="48" fill="bisque" />
+        <rect x="52" y="698" width="1196" height="48" fill="bisque" />
+    </g>
+
+    <!-- 皇宫 -->
+    <g stroke="black" stroke-width="3">
+        <line x1="550" y1="150" x2="750" y2="350" stroke-width="2" />
+        <line x1="750" y1="150" x2="550" y2="350" stroke-width="2" />
+        <line x1="550" y1="950" x2="750" y2="1150" stroke-width="2" />
+        <line x1="750" y1="950" x2="550" y2="1150" stroke-width="2" />
+    </g>
+
+    <!-- 卫的活动点 -->
+    <g stroke="black" stroke-width="3" fill="bisque">
+        <circle cx="50" cy="550" r="10" />
+        <circle cx="250" cy="550" r="6" />
+        <circle cx="450" cy="550" r="10" />
+        <circle cx="650" cy="550" r="6" />
+        <circle cx="850" cy="550" r="10" />
+        <circle cx="1050" cy="550" r="6" />
+        <circle cx="1250" cy="550" r="10" />
+        <circle cx="50" cy="750" r="10" />
+        <circle cx="250" cy="750" r="6" />
+        <circle cx="450" cy="750" r="10" />
+        <circle cx="650" cy="750" r="6" />
+        <circle cx="850" cy="750" r="10" />
+        <circle cx="1050" cy="750" r="6" />
+        <circle cx="1250" cy="750" r="10" />
+    </g>
+
+    <!-- 象点 -->
+    <g fill="black">
+        <circle cx="50" cy="150" r="7" />
+        <circle cx="450" cy="150" r="7" />
+        <circle cx="850" cy="150" r="7" />
+        <circle cx="1250" cy="150" r="7" />
+        <circle cx="250" cy="350" r="7" />
+        <circle cx="650" cy="350" r="7" />
+        <circle cx="1050" cy="350" r="7" />
+        <circle cx="50" cy="550" r="7" />
+        <circle cx="450" cy="550" r="7" />
+        <circle cx="850" cy="550" r="7" />
+        <circle cx="1250" cy="550" r="7" />
+
+        <circle cx="50" cy="750" r="7" />
+        <circle cx="450" cy="750" r="7" />
+        <circle cx="850" cy="750" r="7" />
+        <circle cx="1250" cy="750" r="7" />
+        <circle cx="250" cy="950" r="7" />
+        <circle cx="650" cy="950" r="7" />
+        <circle cx="1050" cy="950" r="7" />
+        <circle cx="50" cy="1150" r="7" />
+        <circle cx="450" cy="1150" r="7" />
+        <circle cx="850" cy="1150" r="7" />
+        <circle cx="1250" cy="1150" r="7" />
+    </g>
+
+    <!-- 锐的斜线 -->
+    <g stroke="black" stroke-width="2" stroke-dasharray="0 42.42 14.14 28.28 14.14 42.42">
+        <line x1="50" y1="50" x2="1250" y2="1250" />
+        <line x1="50" y1="1250" x2="1250" y2="50" />
+        <line x1="50" y1="650" x2="650" y2="50" />
+        <line x1="50" y1="650" x2="650" y2="1250" />
+        <line x1="1250" y1="650" x2="650" y2="50" />
+        <line x1="1250" y1="650" x2="650" y2="1250" />
+    </g>
+
+    <!-- 星点 -->
+    <g stroke="black" stroke-width="5" fill="none">
+        <polyline points="58,70 58,58 70,58" />
+        <polyline points="658,70 658,58 670,58" />
+        <polyline points="358,370 358,358 370,358" />
+        <polyline points="958,370 958,358 970,358" />
+        <polyline points="58,670 58,658 70,658" />
+        <polyline points="658,670 658,658 670,658" />
+        <polyline points="358,970 358,958 370,958" />
+        <polyline points="958,970 958,958 970,958" />
+
+        <polyline points="642,70 642,58 630,58" />
+        <polyline points="1242,70 1242,58 1230,58" />
+        <polyline points="342,370 342,358 330,358" />
+        <polyline points="942,370 942,358 930,358" />
+        <polyline points="642,670 642,658 630,658" />
+        <polyline points="1242,670 1242,658 1230,658" />
+        <polyline points="342,970 342,958 330,958" />
+        <polyline points="942,970 942,958 930,958" />
+        <polyline points="642,70 642,58 630,58" />
+        <polyline points="642,70 642,58 630,58" />
+
+        <polyline points="342,330 342,342 330,342" />
+        <polyline points="942,330 942,342 930,342" />
+        <polyline points="642,630 642,642 630,642" />
+        <polyline points="1242,630 1242,642 1230,642" />
+        <polyline points="342,930 342,942 330,942" />
+        <polyline points="942,930 942,942 930,942" />
+        <polyline points="642,1230 642,1242 630,1242" />
+        <polyline points="1242,1230 1242,1242 1230,1242" />
+
+        <polyline points="358,330 358,342 370,342" />
+        <polyline points="958,330 958,342 970,342" />
+        <polyline points="58,630 58,642 70,642" />
+        <polyline points="658,630 658,642 670,642" />
+        <polyline points="358,930 358,942 370,942" />
+        <polyline points="958,930 958,942 970,942" />
+        <polyline points="58,1230 58,1242 70,1242" />
+        <polyline points="658,1230 658,1242 670,1242" />
+    </g>
+
+    <!-- 中间一行编号 -->
+    <g font-family="board-columns">
+        <circle cx="50" cy="650" r="12" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="50" y="651" font-size="16" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">A</text>
+
+        <circle cx="150" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="150" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">B</text>
+
+        <circle cx="250" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="250" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">C</text>
+
+        <circle cx="350" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="350" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">D</text>
+
+        <circle cx="450" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="450" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">E</text>
+
+        <circle cx="550" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="550" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">F</text>
+
+        <circle cx="650" cy="650" r="12" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="650" y="651" font-size="16" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">G</text>
+
+        <circle cx="750" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="750" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">H</text>
+
+        <circle cx="850" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="850" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">I</text>
+
+        <circle cx="950" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="950" y="651" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">J</text>
+
+        <circle cx="1050" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="1050" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">K</text>
+
+        <circle cx="1150" cy="650" r="15" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="1150" y="652" font-size="18" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">L</text>
+
+        <circle cx="1250" cy="650" r="12" stroke="black" stroke-width="3" fill="bisque" />
+        <text x="1250" y="651" font-size="16" font-weight="bold" fill="black" text-anchor="middle"
+            dominant-baseline="middle">M</text>
+    </g>
+</svg>
