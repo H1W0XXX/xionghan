@@ -20,7 +20,7 @@ const (
 	BoardSize          = 13
 	PolicySize         = BoardSize*BoardSize + 1
 	MaxBatchSize       = 64
-	BatchTimeout       = 1 * time.Millisecond
+	BatchTimeout       = 5 * time.Millisecond
 	// Align with C++ nnPolicyTemperature (policy logits are scaled by 1/temp before softmax).
 	NNPolicyTemperature = 1.0
 )
@@ -100,6 +100,11 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	absCachePath, _ := filepath.Abs("trt_cache")
 	os.MkdirAll(absCachePath, 0755)
 
+	absModelPath, err := resolveModelPath(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve onnx model path: %w", err)
+	}
+
 	// Sync env vars for TensorRT Cache and Logging
 	setNativeEnv("ORT_TENSORRT_ENGINE_CACHE_ENABLE", "1")
 	setNativeEnv("ORT_TENSORRT_ENGINE_CACHE_PATH", absCachePath)
@@ -133,6 +138,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 		log.Printf("NN: ONNX Runtime shared library: %s%s", absLibPath, ansiReset)
 		fmt.Print(ansiReset) // 强行重置可能由 ORT 产生的颜色码
 	}
+	log.Printf("NN: ONNX model: %s%s", absModelPath, ansiReset)
 
 	binInput := make([]float32, MaxBatchSize*NumSpatialFeatures*BoardSize*BoardSize)
 	globalInput := make([]float32, MaxBatchSize*NumGlobalFeatures)
@@ -203,7 +209,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 			continue
 		}
 
-		s, errS := ort.NewAdvancedSession(modelPath, inputNames, outputNames, inputs, outputs, so)
+		s, errS := ort.NewAdvancedSession(absModelPath, inputNames, outputNames, inputs, outputs, so)
 		if errS != nil {
 			log.Printf("NN: %s session creation failed: %v%s", p.name, errS, ansiReset)
 			so.Destroy()

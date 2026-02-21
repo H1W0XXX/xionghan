@@ -5,7 +5,9 @@ import (
 	"log"
 	"net/http"
 	// _ "net/http/pprof"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -27,6 +29,36 @@ func openBrowser(url string) {
 	_ = cmd.Start() // 不阻塞，不关心错误（某些服务器环境可能无图形界面）
 }
 
+func resolveExistingDir(dir string) string {
+	if dir == "" {
+		return dir
+	}
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		if abs, e := filepath.Abs(dir); e == nil {
+			return abs
+		}
+		return dir
+	}
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return dir
+	}
+	exeDir := filepath.Dir(exe)
+	candidates := []string{
+		filepath.Join(exeDir, dir),
+		filepath.Join(exeDir, filepath.Base(dir)),
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+	return dir
+}
+
 func main() {
 	addr := flag.String("addr", ":2888", "listen address")
 	webDir := flag.String("web", "./web", "directory with index.html / js / svg")
@@ -35,6 +67,7 @@ func main() {
 	flag.Parse()
 
 	mux := http.NewServeMux()
+	*webDir = resolveExistingDir(*webDir)
 
 	h := httpserver.NewHandler()
 

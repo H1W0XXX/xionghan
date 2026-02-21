@@ -263,15 +263,32 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				prob float32
 			}
 			scores := make([]moveScore, len(moves))
-
-			for from, indices := range fromGroups {
-				// Stage 1: 为该选定的棋子获取 To 概率
-				res1, err := e.nn.EvaluateWithStage(pos, 1, from)
-				if err != nil || res1 == nil {
+			type stage1Result struct {
+				from int
+				res  *NNResult
+				err  error
+			}
+			stage1Ch := make(chan stage1Result, len(fromGroups))
+			for from := range fromGroups {
+				from := from
+				go func() {
+					res1, err := e.nn.EvaluateWithStage(pos, 1, from)
+					stage1Ch <- stage1Result{from: from, res: res1, err: err}
+				}()
+			}
+			stage1ByFrom := make(map[int]*NNResult, len(fromGroups))
+			for i := 0; i < len(fromGroups); i++ {
+				r := <-stage1Ch
+				if r.err != nil || r.res == nil {
 					e.markNNFailure()
 					return 0, xionghan.Move{}
 				}
+				stage1ByFrom[r.from] = r.res
+			}
+
+			for from, indices := range fromGroups {
 				fromProb := res0.Policy[from]
+				res1 := stage1ByFrom[from]
 				for _, idx := range indices {
 					toProb := res1.Policy[moves[idx].To]
 					scores[idx] = moveScore{idx: idx, prob: fromProb * toProb}

@@ -30,7 +30,7 @@ do
     echo "--- Starting Selfplay (5,000 Games) ---"
     # 1. 自博弈产生数据 - 调整为 5000 局以加快迭代速度
     $KATAGO_BIN selfplay -models-dir ../data/models -config ../selfplay.cfg -output-dir ../data/selfplay -max-games-total 5000
-    
+
     # 检查是否有数据产生
     if [ ! "$(ls -A ../data/selfplay/)" ]; then
         echo "Error: No selfplay data generated! Check for library or model errors."
@@ -40,14 +40,15 @@ do
     echo "--- Starting Shuffle ---"
     # 2. 数据洗牌 - 增加并行度
     bash shuffle.sh ../data ../data/tmp 32 1024
-    
+
     echo "--- Starting Training (2*4090 DDP) ---"
     # 3. 训练模型 (4090 显卡 0,1)
     bash train.sh ../data $MODEL_KIND $MODEL_DESC 1024 main \
       -samples-per-epoch 1000000 \
       -pos-len 13 \
-      -multi-gpus 0,1
-    
+      -multi-gpus 0,1 \
+      -lr-scale 0.5
+
     echo "--- Exporting Model ---"
     # 4. 导出模型供下一轮使用
     python3 export_model_pytorch.py \
