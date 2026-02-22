@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"math/rand"
 	"net/http"
@@ -14,7 +15,8 @@ import (
 
 // 一个简单的内存对局管理：exe 本地跑，人类玩足够了
 type Game struct {
-	Pos *xionghan.Position
+	Pos       *xionghan.Position
+	HashCount map[uint64]int
 }
 
 var (
@@ -91,7 +93,10 @@ func (h *Handler) handleNewGame(w http.ResponseWriter, r *http.Request) {
 	pos := xionghan.NewInitialPosition()
 	legal := pos.GenerateLegalMoves(false)
 
-	game := &Game{Pos: pos}
+	game := &Game{
+		Pos:       pos,
+		HashCount: map[uint64]int{pos.EnsureHash(): 1},
+	}
 	id := newGameID()
 
 	gamesMu.Lock()
@@ -114,15 +119,16 @@ func (h *Handler) handlePlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gamesMu.RLock()
+	gamesMu.Lock()
 	game, ok := games[req.GameID]
-	gamesMu.RUnlock()
 	if !ok {
+		gamesMu.Unlock()
 		http.Error(w, "game not found", http.StatusNotFound)
 		return
 	}
 
 	pos := game.Pos
+	ensureGameHashCount(game)
 	legal := pos.GenerateLegalMoves(false)
 
 	// 确认这步是不是合法招之一
@@ -134,18 +140,28 @@ func (h *Handler) handlePlay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if found == nil {
+		gamesMu.Unlock()
 		http.Error(w, "illegal move", http.StatusBadRequest)
 		return
 	}
 
 	newPos, ok2 := pos.ApplyMove(*found)
 	if !ok2 {
+		gamesMu.Unlock()
 		http.Error(w, "apply move failed", http.StatusInternalServerError)
+		return
+	}
+	if shouldEnableRepetitionRule(pos) && isRepetitionForbidden(game.HashCount, newPos) {
+		gamesMu.Unlock()
+		http.Error(w, "repetition_forbidden", http.StatusBadRequest)
 		return
 	}
 
 	// 更新对局
 	game.Pos = newPos
+	game.HashCount[newPos.EnsureHash()]++
+	gamesMu.Unlock()
+
 	legal2 := newPos.GenerateLegalMoves(false)
 
 	status := "ongoing"
@@ -177,7 +193,11 @@ func (h *Handler) handleState(w http.ResponseWriter, r *http.Request) {
 	gamesMu.RLock()
 	game, ok := games[req.GameID]
 	gamesMu.RUnlock()
-	if !ok || game == nil || game.Pos == nil {
+	if !ok {
+		http.Error(w, "game not found", http.StatusNotFound)
+		return
+	}
+	if game == nil || game.Pos == nil {
 		http.Error(w, "game not found", http.StatusNotFound)
 		return
 	}
@@ -207,6 +227,10 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing position", http.StatusBadRequest)
 		return
 	}
+	if req.GameID == "" {
+		http.Error(w, "missing game_id", http.StatusBadRequest)
+		return
+	}
 
 	// ===== 1. 从字符串局面还原 Position =====
 	// 这里假设你有类似这样的函数：
@@ -224,6 +248,12 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 		pos.SideToMove = reqSide
 		pos.Hash = pos.CalculateHash()
 	}
+	legalNow := movesToDTO(pos.GenerateLegalMoves(false))
+	historyCount, err := snapshotHashCount(req.GameID)
+	if err != nil {
+		http.Error(w, "game not found", http.StatusNotFound)
+		return
+	}
 
 	// ===== 2. 搜索参数 =====
 	depth := req.MaxDepth
@@ -236,8 +266,11 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := engine.SearchConfig{
-		MaxDepth:  depth,
-		TimeLimit: limit,
+		MaxDepth:               depth,
+		TimeLimit:              limit,
+		EnableRepetitionFilter: shouldEnableRepetitionRule(pos),
+		RepetitionCount:        historyCount,
+		RepetitionBanCount:     3,
 	}
 
 	// ===== 3. 调用搜索，只思考不落子 =====
@@ -245,15 +278,55 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 
 	// NN 推理失败：本次请求直接失败，不落子不换边。
 	if res.NNFailed {
+		moves := pos.GenerateLegalMoves(true)
+		moves = aiEngine.FilterLeiLockedMoves(pos, moves)
+		moves = aiEngine.FilterUrgentPawnThreatMoves(pos, moves)
+		moves = aiEngine.FilterBlunderMoves(pos, moves)
+		moves = aiEngine.FilterVCFMoves(pos, moves)
+		if shouldEnableRepetitionRule(pos) {
+			filtered := make([]xionghan.Move, 0, len(moves))
+			for _, mv := range moves {
+				nextPos, ok := pos.ApplyMove(mv)
+				if !ok {
+					continue
+				}
+				if isRepetitionForbidden(historyCount, nextPos) {
+					continue
+				}
+				filtered = append(filtered, mv)
+			}
+			moves = filtered
+		}
+		if len(moves) > 0 {
+			fallback := moves[rand.Intn(len(moves))]
+			resp := AiMoveResponse{
+				BestMove: MoveDTO{
+					From: fallback.From,
+					To:   fallback.To,
+				},
+				Score:      0,
+				WinProb:    0.5,
+				Depth:      res.Depth,
+				Nodes:      res.Nodes,
+				TimeMs:     res.TimeUsed.Milliseconds(),
+				Position:   pos.Encode(),
+				ToMove:     sideToInt(pos.SideToMove),
+				LegalMoves: legalNow,
+				Status:     "ok",
+			}
+			writeJSON(w, resp)
+			return
+		}
 		resp := AiMoveResponse{
-			BestMove: MoveDTO{From: -1, To: -1},
-			Score:    res.Score,
-			Depth:    res.Depth,
-			Nodes:    res.Nodes,
-			TimeMs:   res.TimeUsed.Milliseconds(),
-			Position: pos.Encode(),
-			ToMove:   sideToInt(pos.SideToMove),
-			Status:   "nn_error",
+			BestMove:   MoveDTO{From: -1, To: -1},
+			Score:      res.Score,
+			Depth:      res.Depth,
+			Nodes:      res.Nodes,
+			TimeMs:     res.TimeUsed.Milliseconds(),
+			Position:   pos.Encode(),
+			ToMove:     sideToInt(pos.SideToMove),
+			LegalMoves: legalNow,
+			Status:     "no_moves",
 		}
 		writeJSON(w, resp)
 		return
@@ -262,33 +335,87 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 	// 没有走法
 	if res.BestMove.From == 0 && res.BestMove.To == 0 {
 		resp := AiMoveResponse{
-			BestMove: MoveDTO{From: -1, To: -1},
-			Score:    res.Score,
-			Depth:    res.Depth,
-			Nodes:    res.Nodes,
-			TimeMs:   res.TimeUsed.Milliseconds(),
-			Position: pos.Encode(),              // 原局面
-			ToMove:   sideToInt(pos.SideToMove), // 当前轮到谁（理论上和 req.ToMove 一样）
-			Status:   "no_moves",
+			BestMove:   MoveDTO{From: -1, To: -1},
+			Score:      res.Score,
+			Depth:      res.Depth,
+			Nodes:      res.Nodes,
+			TimeMs:     res.TimeUsed.Milliseconds(),
+			Position:   pos.Encode(),              // 原局面
+			ToMove:     sideToInt(pos.SideToMove), // 当前轮到谁（理论上和 req.ToMove 一样）
+			LegalMoves: legalNow,
+			Status:     "no_moves",
 		}
 		writeJSON(w, resp)
 		return
 	}
-
 	// 正常返回
 	resp := AiMoveResponse{
 		BestMove: MoveDTO{
 			From: res.BestMove.From,
 			To:   res.BestMove.To,
 		},
-		Score:    res.Score,
-		WinProb:  res.WinProb,
-		Depth:    res.Depth,
-		Nodes:    res.Nodes,
-		TimeMs:   res.TimeUsed.Milliseconds(),
-		Position: pos.Encode(),              // 仍是原局面
-		ToMove:   sideToInt(pos.SideToMove), // 当前轮到谁
-		Status:   "ok",
+		Score:      res.Score,
+		WinProb:    res.WinProb,
+		Depth:      res.Depth,
+		Nodes:      res.Nodes,
+		TimeMs:     res.TimeUsed.Milliseconds(),
+		Position:   pos.Encode(),              // 仍是原局面
+		ToMove:     sideToInt(pos.SideToMove), // 当前轮到谁
+		LegalMoves: legalNow,
+		Status:     "ok",
 	}
 	writeJSON(w, resp)
+}
+
+const repetitionRulePieceThreshold = 40
+
+func ensureGameHashCount(game *Game) {
+	if game == nil || game.Pos == nil {
+		return
+	}
+	if game.HashCount == nil {
+		game.HashCount = make(map[uint64]int)
+	}
+	if len(game.HashCount) == 0 {
+		game.HashCount[game.Pos.EnsureHash()] = 1
+	}
+}
+
+func shouldEnableRepetitionRule(pos *xionghan.Position) bool {
+	if pos == nil {
+		return false
+	}
+	return pos.TotalPieces() < repetitionRulePieceThreshold
+}
+
+func isRepetitionForbidden(hashCount map[uint64]int, nextPos *xionghan.Position) bool {
+	if nextPos == nil {
+		return true
+	}
+	nextHash := nextPos.EnsureHash()
+	return hashCount[nextHash]+1 >= 3
+}
+
+func snapshotHashCount(gameID string) (map[uint64]int, error) {
+	gamesMu.RLock()
+	game, ok := games[gameID]
+	if !ok || game == nil || game.Pos == nil {
+		gamesMu.RUnlock()
+		return nil, errors.New("game not found")
+	}
+	out := make(map[uint64]int)
+	if game.HashCount != nil && len(game.HashCount) > 0 {
+		out = make(map[uint64]int, len(game.HashCount))
+		for k, v := range game.HashCount {
+			out[k] = v
+		}
+	} else {
+		hash := game.Pos.Hash
+		if hash == 0 {
+			hash = game.Pos.CalculateHash()
+		}
+		out[hash] = 1
+	}
+	gamesMu.RUnlock()
+	return out, nil
 }

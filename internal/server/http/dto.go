@@ -4,6 +4,7 @@ import "xionghan/internal/xionghan"
 
 // AiMoveRequest 请求让 AI 为当前局面走一步
 type AiMoveRequest struct {
+	GameID   string `json:"game_id"`  // 对局 ID，用于读取重复局面历史
 	Position string `json:"position"` // 当前局面（前端把 pos.Encode() 传回来）
 	ToMove   int    `json:"to_move"`  // 0=红, 1=黑（或绿），和你 sideToInt 对应
 	MaxDepth int    `json:"max_depth"`

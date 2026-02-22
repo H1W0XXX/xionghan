@@ -27,8 +27,11 @@ func init() {
 
 // 搜索配置
 type SearchConfig struct {
-	MaxDepth  int           // 最大搜索深度（ply）
-	TimeLimit time.Duration // 搜索时间上限（0 表示不限制）
+	MaxDepth               int            // 最大搜索深度（ply）
+	TimeLimit              time.Duration  // 搜索时间上限（0 表示不限制）
+	EnableRepetitionFilter bool           // 是否启用重复局面禁手（搜索阶段）
+	RepetitionCount        map[uint64]int // 局面历史计数（包含当前局面）
+	RepetitionBanCount     int            // 达到该次数后禁手（例如 3）
 }
 
 // 搜索结果
@@ -129,6 +132,7 @@ func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) [
 // 根节点搜索：带简单迭代加深（根节点内部并行）
 func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	e.resetNNAbort()
+	rep := newRepetitionState(cfg)
 
 	// 1. 绝杀判定：直接吃王
 	moves := pos.GenerateLegalMoves(true)
@@ -136,6 +140,12 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	for _, mv := range moves {
 		targetPiece := pos.Board.Squares[mv.To]
 		if targetPiece != 0 && targetPiece.Type() == xionghan.PieceKing {
+			if rep.enabled {
+				nextPos, ok := pos.ApplyMove(mv)
+				if !ok || !rep.canEnter(nextPos.EnsureHash()) {
+					continue
+				}
+			}
 			return SearchResult{
 				BestMove: mv,
 				Score:    scoreInf,
@@ -152,6 +162,12 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	if pos.TotalPieces() <= 43 {
 		vcfRes := e.VCFSearch(pos, vcfDepthRoot)
 		if vcfRes.CanWin {
+			if rep.enabled {
+				nextPos, ok := pos.ApplyMove(vcfRes.Move)
+				if !ok || !rep.canEnter(nextPos.EnsureHash()) {
+					goto skipVCFShortcut
+				}
+			}
 			return SearchResult{
 				BestMove: vcfRes.Move,
 				Score:    900000,
@@ -163,6 +179,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 			}
 		}
 	}
+skipVCFShortcut:
 
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = 3
@@ -188,14 +205,14 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			break
 		}
-		score, move := e.alphaBetaRoot(pos, depth, -scoreInf, scoreInf, deadline)
+		score, move := e.alphaBetaRoot(pos, depth, -scoreInf, scoreInf, deadline, rep)
 		if e.hasNNFailure() {
 			bestMove = xionghan.Move{}
 			bestDepth = 0
 			break
 		}
 		if move.From == 0 && move.To == 0 {
-			// 搜不到有效着法（可能是无子可动）
+			// 搜不到有效着法（可能是无子可动或重复禁手后无路）
 			break
 		}
 		bestMove = move
@@ -232,7 +249,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 }
 
 // 根节点：根据 SideToMove 决定是 max 还是 min，并行搜索每个着法
-func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) (int, xionghan.Move) {
+func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time, rep *repetitionState) (int, xionghan.Move) {
 	if e.hasNNFailure() {
 		return 0, xionghan.Move{}
 	}
@@ -316,9 +333,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 		orderMovesByCaptureFirst(pos, moves)
 	}
 
-	// 根节点用全局 TT 排序是安全的：这里还是单线程
+	// 根节点用 TT 排序；key 会包含重复状态签名，避免历史路径污染。
 	side := pos.SideToMove
-	key := hashPosition(pos)
+	key := ttKeyForPosition(pos, rep)
 	if entry, ok := e.tt[key]; ok {
 		// 把 entry.Move 提到前面
 		for i := range moves {
@@ -334,6 +351,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	type childNode struct {
 		move  xionghan.Move
 		child *xionghan.Position
+		hash  uint64
 	}
 	children := make([]childNode, 0, len(moves))
 	for _, mv := range moves {
@@ -341,9 +359,14 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 		if !ok {
 			continue
 		}
+		childHash := child.EnsureHash()
+		if rep != nil && rep.enabled && !rep.canEnter(childHash) {
+			continue
+		}
 		children = append(children, childNode{
 			move:  mv,
 			child: child,
+			hash:  childHash,
 		})
 	}
 
@@ -361,7 +384,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			nnAbort:        e.nnAbort,
 			nnCache:        e.nnCache,
 		}
-		score := local.alphaBeta(children[0].child, depth-1, alpha, beta, deadline)
+		localRep := rep.clone()
+		localRep.push(children[0].hash)
+		score := local.alphaBeta(children[0].child, depth-1, alpha, beta, deadline, localRep)
 		if local.nodes != 0 {
 			atomic.AddInt64(&e.nodes, local.nodes)
 		}
@@ -392,7 +417,9 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 				nnAbort:        e.nnAbort,
 				nnCache:        e.nnCache,
 			}
-			score := local.alphaBeta(ch.child, depth-1, alpha, beta, deadline)
+			localRep := rep.clone()
+			localRep.push(ch.hash)
+			score := local.alphaBeta(ch.child, depth-1, alpha, beta, deadline, localRep)
 			if local.nodes != 0 {
 				atomic.AddInt64(&e.nodes, local.nodes)
 			}
@@ -451,7 +478,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 }
 
 // 内部递归：标准 alpha-beta（在并行版本里由每个局部 Engine 独享调用）
-func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time) int {
+func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, deadline time.Time, rep *repetitionState) int {
 	e.nodes++
 	if e.hasNNFailure() {
 		return 0
@@ -465,7 +492,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 		return e.eval(pos)
 	}
 
-	key := hashPosition(pos)
+	key := ttKeyForPosition(pos, rep)
 	origAlpha, origBeta := alpha, beta
 	ttMove := xionghan.Move{}
 	if entry, ok := e.tt[key]; ok {
@@ -526,7 +553,22 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			if !ok {
 				continue
 			}
-			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
+
+			pushed := false
+			var childHash uint64
+			if rep != nil && rep.enabled {
+				childHash = child.EnsureHash()
+				if !rep.canEnter(childHash) {
+					continue
+				}
+				rep.push(childHash)
+				pushed = true
+			}
+
+			score := e.alphaBeta(child, depth-1, alpha, beta, deadline, rep)
+			if pushed {
+				rep.pop(childHash)
+			}
 			if e.hasNNFailure() {
 				return 0
 			}
@@ -548,7 +590,22 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			if !ok {
 				continue
 			}
-			score := e.alphaBeta(child, depth-1, alpha, beta, deadline)
+
+			pushed := false
+			var childHash uint64
+			if rep != nil && rep.enabled {
+				childHash = child.EnsureHash()
+				if !rep.canEnter(childHash) {
+					continue
+				}
+				rep.push(childHash)
+				pushed = true
+			}
+
+			score := e.alphaBeta(child, depth-1, alpha, beta, deadline, rep)
+			if pushed {
+				rep.pop(childHash)
+			}
 			if e.hasNNFailure() {
 				return 0
 			}
@@ -579,6 +636,138 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 	// 存入 TT（这里写的是局部 Engine 的 tt，不会有并发冲突）
 	e.storeTT(key, depth, bestScore, flag, bestMove)
 	return bestScore
+}
+
+type repetitionState struct {
+	enabled  bool
+	banCount int
+	capLimit int
+	base     map[uint64]int
+	path     map[uint64]int
+	sig      uint64
+}
+
+func newRepetitionState(cfg SearchConfig) *repetitionState {
+	if !cfg.EnableRepetitionFilter {
+		return &repetitionState{}
+	}
+	banCount := cfg.RepetitionBanCount
+	if banCount <= 1 {
+		banCount = 3
+	}
+	capLimit := banCount - 1
+	if capLimit < 1 {
+		capLimit = 1
+	}
+	base := make(map[uint64]int, len(cfg.RepetitionCount))
+	var sig uint64
+	for k, v := range cfg.RepetitionCount {
+		c := capRepetitionCount(v, capLimit)
+		if c <= 0 {
+			continue
+		}
+		base[k] = c
+		sig ^= repetitionCountKey(k, c)
+	}
+	return &repetitionState{
+		enabled:  true,
+		banCount: banCount,
+		capLimit: capLimit,
+		base:     base,
+		path:     make(map[uint64]int, 32),
+		sig:      sig,
+	}
+}
+
+func (r *repetitionState) clone() *repetitionState {
+	if r == nil || !r.enabled {
+		return &repetitionState{}
+	}
+	cp := &repetitionState{
+		enabled:  true,
+		banCount: r.banCount,
+		capLimit: r.capLimit,
+		base:     r.base,
+		path:     make(map[uint64]int, len(r.path)+8),
+		sig:      r.sig,
+	}
+	for k, v := range r.path {
+		cp.path[k] = v
+	}
+	return cp
+}
+
+func (r *repetitionState) canEnter(hash uint64) bool {
+	if r == nil || !r.enabled {
+		return true
+	}
+	seen := r.base[hash] + r.path[hash] + 1
+	return seen < r.banCount
+}
+
+func (r *repetitionState) push(hash uint64) {
+	if r == nil || !r.enabled {
+		return
+	}
+	oldCap := capRepetitionCount(r.base[hash]+r.path[hash], r.capLimit)
+	r.path[hash]++
+	newCap := capRepetitionCount(r.base[hash]+r.path[hash], r.capLimit)
+	r.applySigDelta(hash, oldCap, newCap)
+}
+
+func (r *repetitionState) pop(hash uint64) {
+	if r == nil || !r.enabled {
+		return
+	}
+	oldCap := capRepetitionCount(r.base[hash]+r.path[hash], r.capLimit)
+	if n := r.path[hash]; n <= 1 {
+		delete(r.path, hash)
+	} else {
+		r.path[hash] = n - 1
+	}
+	newCap := capRepetitionCount(r.base[hash]+r.path[hash], r.capLimit)
+	r.applySigDelta(hash, oldCap, newCap)
+}
+
+func (r *repetitionState) applySigDelta(hash uint64, oldCap, newCap int) {
+	if oldCap == newCap {
+		return
+	}
+	if oldCap > 0 {
+		r.sig ^= repetitionCountKey(hash, oldCap)
+	}
+	if newCap > 0 {
+		r.sig ^= repetitionCountKey(hash, newCap)
+	}
+}
+
+func capRepetitionCount(n, capLimit int) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > capLimit {
+		return capLimit
+	}
+	return n
+}
+
+func repetitionCountKey(hash uint64, count int) uint64 {
+	return mix64(hash ^ 0x517cc1b727220a95 ^ uint64(count)*0x9e3779b97f4a7c15)
+}
+
+func ttKeyForPosition(pos *xionghan.Position, rep *repetitionState) uint64 {
+	key := hashPosition(pos)
+	if rep == nil || !rep.enabled {
+		return key
+	}
+	return key ^ mix64(rep.sig^0x6a09e667f3bcc909)
+}
+
+func mix64(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
 }
 
 // 一个非常粗暴的“吃子优先”排序

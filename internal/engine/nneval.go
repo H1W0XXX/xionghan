@@ -15,12 +15,12 @@ import (
 )
 
 const (
-	NumSpatialFeatures = 25
-	NumGlobalFeatures  = 19
-	BoardSize          = 13
-	PolicySize         = BoardSize*BoardSize + 1
-	MaxBatchSize       = 64
-	BatchTimeout       = 5 * time.Millisecond
+	NumSpatialFeatures  = 25
+	NumGlobalFeatures   = 19
+	BoardSize           = 13
+	PolicySize          = BoardSize*BoardSize + 1
+	defaultMaxBatchSize = 512
+	BatchTimeout        = 5 * time.Millisecond
 	// Align with C++ nnPolicyTemperature (policy logits are scaled by 1/temp before softmax).
 	NNPolicyTemperature = 1.0
 )
@@ -57,19 +57,25 @@ type NNResult struct {
 	Policy   []float32
 }
 
-type NNEvaluator struct {
-	session *ort.AdvancedSession
-	queue   chan evalRequest
+type nnRuntime struct {
+	batchSize int
+	modelPath string
+	session   *ort.AdvancedSession
+	mu        sync.Mutex
 
-	// Buffers
 	binInput    []float32
 	globalInput []float32
 	policy      []float32
 	value       []float32
 
-	// Persistent Tensors
 	inputs  []ort.Value
 	outputs []ort.Value
+}
+
+type NNEvaluator struct {
+	runtimes []*nnRuntime
+	maxBatch int
+	queue    chan evalRequest
 
 	// Stats
 	totalItems   int64
@@ -103,6 +109,16 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	absModelPath, err := resolveModelPath(modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve onnx model path: %w", err)
+	}
+	modelProfiles := make([]struct {
+		batch int
+		path  string
+	}, 0, 12)
+	for b := 1; b <= defaultMaxBatchSize; b <<= 1 {
+		modelProfiles = append(modelProfiles, struct {
+			batch int
+			path  string
+		}{batch: b, path: absModelPath})
 	}
 
 	// Sync env vars for TensorRT Cache and Logging
@@ -138,29 +154,7 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 		log.Printf("NN: ONNX Runtime shared library: %s%s", absLibPath, ansiReset)
 		fmt.Print(ansiReset) // 强行重置可能由 ORT 产生的颜色码
 	}
-	log.Printf("NN: ONNX model: %s%s", absModelPath, ansiReset)
-
-	binInput := make([]float32, MaxBatchSize*NumSpatialFeatures*BoardSize*BoardSize)
-	globalInput := make([]float32, MaxBatchSize*NumGlobalFeatures)
-	policy := make([]float32, MaxBatchSize*PolicySize)
-	value := make([]float32, MaxBatchSize*3)
-
-	binShape := ort.NewShape(MaxBatchSize, int64(NumSpatialFeatures), int64(BoardSize), int64(BoardSize))
-	globalShape := ort.NewShape(MaxBatchSize, int64(NumGlobalFeatures))
-	policyShape := ort.NewShape(MaxBatchSize, int64(PolicySize))
-	valueShape := ort.NewShape(MaxBatchSize, 3)
-
-	inputTensor1, _ := ort.NewTensor(binShape, binInput)
-	inputTensor2, _ := ort.NewTensor(globalShape, globalInput)
-	outputTensor1, _ := ort.NewTensor(policyShape, policy)
-	outputTensor2, _ := ort.NewTensor(valueShape, value)
-
-	inputNames := []string{"bin_inputs", "global_inputs"}
-	outputNames := []string{"policy", "value"}
-	inputs := []ort.Value{inputTensor1, inputTensor2}
-	outputs := []ort.Value{outputTensor1, outputTensor2}
-
-	var session *ort.AdvancedSession
+	log.Printf("NN: ONNX model (dynamic, single file): %s, runtime max batch=%d%s", absModelPath, defaultMaxBatchSize, ansiReset)
 
 	providers := []struct {
 		name  string
@@ -202,71 +196,223 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 		{"CPU", func(so *ort.SessionOptions) error { return nil }},
 	}
 
-	var success bool
+	var runtimes []*nnRuntime
+	selectedProvider := ""
 	for _, p := range providers {
 		log.Printf("NN: Attempting to initialize with %s...%s", p.name, ansiReset)
-		so, _ := ort.NewSessionOptions()
-		_ = so.SetLogSeverityLevel(3)
-
-		if err := p.setup(so); err != nil {
-			log.Printf("NN: %s setup failed: %v%s", p.name, err, ansiReset)
-			so.Destroy()
+		tryRuntimes := make([]*nnRuntime, 0, len(modelProfiles))
+		ok := true
+		for _, mp := range modelProfiles {
+			rt, errBuild := createRuntimeForProfile(mp.path, mp.batch, p.setup)
+			if errBuild != nil {
+				log.Printf("NN: %s profile b=%d init failed: %v%s", p.name, mp.batch, errBuild, ansiReset)
+				for _, built := range tryRuntimes {
+					built.destroy()
+				}
+				ok = false
+				break
+			}
+			tryRuntimes = append(tryRuntimes, rt)
+		}
+		if !ok {
 			continue
 		}
-
-		s, errS := ort.NewAdvancedSession(absModelPath, inputNames, outputNames, inputs, outputs, so)
-		if errS != nil {
-			log.Printf("NN: %s session creation failed: %v%s", p.name, errS, ansiReset)
-			so.Destroy()
-			continue
+		// Run one synchronous warmup on the smallest profile to ensure provider is truly usable.
+		if len(tryRuntimes) > 0 {
+			log.Printf("NN: Warming up %s profile b=%d...%s", p.name, tryRuntimes[0].batchSize, ansiReset)
+			if errRun := runWarmup(tryRuntimes[0]); errRun != nil {
+				log.Printf("NN: %s profile b=%d warmup failed: %v%s", p.name, tryRuntimes[0].batchSize, errRun, ansiReset)
+				for _, built := range tryRuntimes {
+					built.destroy()
+				}
+				continue
+			}
 		}
-
-		// Warmup
-		log.Printf("NN: Warming up %s...%s", p.name, ansiReset)
-		if errRun := s.Run(); errRun != nil {
-			log.Printf("NN: %s warmup failed: %v%s", p.name, errRun, ansiReset)
-			s.Destroy()
-			so.Destroy()
-			continue
-		}
-
-		log.Printf("NN: Successfully initialized with %s.%s", p.name, ansiReset)
-		session = s
-		success = true
-		so.Destroy()
+		runtimes = tryRuntimes
+		selectedProvider = p.name
+		log.Printf("NN: Successfully initialized with %s (%d profiles).%s", p.name, len(runtimes), ansiReset)
 		break
 	}
 
-	if !success {
+	if len(runtimes) == 0 {
 		return nil, fmt.Errorf("failed to initialize NN with any provider")
 	}
 
+	maxBatch := 0
+	for _, rt := range runtimes {
+		if rt.batchSize > maxBatch {
+			maxBatch = rt.batchSize
+		}
+	}
+	if maxBatch <= 0 {
+		maxBatch = defaultMaxBatchSize
+	}
+
 	n := &NNEvaluator{
+		runtimes: runtimes,
+		maxBatch: maxBatch,
+		queue:    make(chan evalRequest, maxBatch*10),
+	}
+
+	go n.batchLoop()
+	go n.warmupProfilesAsync(selectedProvider)
+
+	return n, nil
+}
+
+func runWarmup(rt *nnRuntime) error {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.session.Run()
+}
+
+func (n *NNEvaluator) warmupProfilesAsync(providerName string) {
+	if len(n.runtimes) <= 1 {
+		return
+	}
+	log.Printf("NN: Background warmup started for %s (%d pending profiles).%s", providerName, len(n.runtimes)-1, ansiReset)
+	for i := len(n.runtimes) - 1; i >= 1; i-- {
+		rt := n.runtimes[i]
+		log.Printf("NN: Background warming %s profile b=%d...%s", providerName, rt.batchSize, ansiReset)
+		if err := runWarmup(rt); err != nil {
+			log.Printf("NN: Background warmup failed for %s profile b=%d: %v%s", providerName, rt.batchSize, err, ansiReset)
+			return
+		}
+	}
+	log.Printf("NN: Background warmup finished for %s.%s", providerName, ansiReset)
+}
+
+func createRuntimeForProfile(modelPath string, batchSize int, setupProvider func(*ort.SessionOptions) error) (*nnRuntime, error) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("invalid batch size %d", batchSize)
+	}
+	binInput := make([]float32, batchSize*NumSpatialFeatures*BoardSize*BoardSize)
+	globalInput := make([]float32, batchSize*NumGlobalFeatures)
+	policy := make([]float32, batchSize*PolicySize)
+	value := make([]float32, batchSize*3)
+
+	binShape := ort.NewShape(int64(batchSize), int64(NumSpatialFeatures), int64(BoardSize), int64(BoardSize))
+	globalShape := ort.NewShape(int64(batchSize), int64(NumGlobalFeatures))
+	policyShape := ort.NewShape(int64(batchSize), int64(PolicySize))
+	valueShape := ort.NewShape(int64(batchSize), 3)
+
+	inputTensor1, err := ort.NewTensor(binShape, binInput)
+	if err != nil {
+		return nil, err
+	}
+	inputTensor2, err := ort.NewTensor(globalShape, globalInput)
+	if err != nil {
+		inputTensor1.Destroy()
+		return nil, err
+	}
+	outputTensor1, err := ort.NewTensor(policyShape, policy)
+	if err != nil {
+		inputTensor1.Destroy()
+		inputTensor2.Destroy()
+		return nil, err
+	}
+	outputTensor2, err := ort.NewTensor(valueShape, value)
+	if err != nil {
+		inputTensor1.Destroy()
+		inputTensor2.Destroy()
+		outputTensor1.Destroy()
+		return nil, err
+	}
+
+	inputNames := []string{"bin_inputs", "global_inputs"}
+	outputNames := []string{"policy", "value"}
+	inputs := []ort.Value{inputTensor1, inputTensor2}
+	outputs := []ort.Value{outputTensor1, outputTensor2}
+
+	so, err := ort.NewSessionOptions()
+	if err != nil {
+		outputTensor2.Destroy()
+		outputTensor1.Destroy()
+		inputTensor2.Destroy()
+		inputTensor1.Destroy()
+		return nil, err
+	}
+	_ = so.SetLogSeverityLevel(3)
+	if err := setupProvider(so); err != nil {
+		so.Destroy()
+		outputTensor2.Destroy()
+		outputTensor1.Destroy()
+		inputTensor2.Destroy()
+		inputTensor1.Destroy()
+		return nil, err
+	}
+
+	session, err := ort.NewAdvancedSession(modelPath, inputNames, outputNames, inputs, outputs, so)
+	so.Destroy()
+	if err != nil {
+		outputTensor2.Destroy()
+		outputTensor1.Destroy()
+		inputTensor2.Destroy()
+		inputTensor1.Destroy()
+		return nil, err
+	}
+
+	return &nnRuntime{
+		batchSize:   batchSize,
+		modelPath:   modelPath,
 		session:     session,
-		queue:       make(chan evalRequest, MaxBatchSize*10),
 		binInput:    binInput,
 		globalInput: globalInput,
 		policy:      policy,
 		value:       value,
 		inputs:      inputs,
 		outputs:     outputs,
-	}
-
-	go n.batchLoop()
-
-	return n, nil
+	}, nil
 }
 
 func (n *NNEvaluator) Close() {
-	if n.session != nil {
-		n.session.Destroy()
+	for _, rt := range n.runtimes {
+		rt.destroy()
 	}
-	for _, v := range n.inputs {
+}
+
+func (rt *nnRuntime) destroy() {
+	if rt == nil {
+		return
+	}
+	if rt.session != nil {
+		rt.session.Destroy()
+	}
+	for _, v := range rt.inputs {
 		v.Destroy()
 	}
-	for _, v := range n.outputs {
+	for _, v := range rt.outputs {
 		v.Destroy()
 	}
+}
+
+func (n *NNEvaluator) selectRuntime(batchSize int) *nnRuntime {
+	if len(n.runtimes) == 0 {
+		return nil
+	}
+	for _, rt := range n.runtimes {
+		if batchSize <= rt.batchSize {
+			return rt
+		}
+	}
+	return n.runtimes[len(n.runtimes)-1]
+}
+
+func (n *NNEvaluator) maxRuntimeBatch() int {
+	if n.maxBatch > 0 {
+		return n.maxBatch
+	}
+	maxBatch := 0
+	for _, rt := range n.runtimes {
+		if rt.batchSize > maxBatch {
+			maxBatch = rt.batchSize
+		}
+	}
+	if maxBatch <= 0 {
+		maxBatch = defaultMaxBatchSize
+	}
+	n.maxBatch = maxBatch
+	return maxBatch
 }
 
 func (n *NNEvaluator) Evaluate(pos *xionghan.Position) (*NNResult, error) {
@@ -287,7 +433,8 @@ func (n *NNEvaluator) EvaluateWithStage(pos *xionghan.Position, stage int, chose
 }
 
 func (n *NNEvaluator) batchLoop() {
-	requests := make([]evalRequest, 0, MaxBatchSize)
+	maxBatch := n.maxRuntimeBatch()
+	requests := make([]evalRequest, 0, maxBatch)
 	for {
 		requests = requests[:0]
 		req, ok := <-n.queue
@@ -298,7 +445,7 @@ func (n *NNEvaluator) batchLoop() {
 
 		timeout := time.After(BatchTimeout)
 	collect:
-		for len(requests) < MaxBatchSize {
+		for len(requests) < maxBatch {
 			select {
 			case r := <-n.queue:
 				requests = append(requests, r)
@@ -312,39 +459,70 @@ func (n *NNEvaluator) batchLoop() {
 
 func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	batchSize := len(requests)
+	if batchSize == 0 {
+		return
+	}
+
+	plans := planInferenceBatches(batchSize, n.maxRuntimeBatch())
+	offset := 0
+	for _, cap := range plans {
+		if offset >= batchSize {
+			break
+		}
+		take := batchSize - offset
+		if take > cap {
+			take = cap
+		}
+		chunkReqs := requests[offset : offset+take]
+		if err := n.runChunk(cap, chunkReqs); err != nil {
+			for _, req := range requests[offset:] {
+				req.result <- evalResponse{err: err}
+			}
+			return
+		}
+		offset += take
+	}
+}
+
+func (n *NNEvaluator) runChunk(capacity int, requests []evalRequest) error {
+	rt := n.selectRuntime(capacity)
+	if rt == nil {
+		return errors.New("no available nn runtime")
+	}
+	if len(requests) > rt.batchSize {
+		return fmt.Errorf("chunk too large: %d > runtime batch %d", len(requests), rt.batchSize)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
 	var wg sync.WaitGroup
 	for i, req := range requests {
 		wg.Add(1)
 		go func(idx int, r evalRequest) {
 			defer wg.Done()
-			n.fillOne(idx, r.pos, r.stage, r.chosenSquare)
+			n.fillOne(rt, idx, r.pos, r.stage, r.chosenSquare)
 		}(i, req)
 	}
 	wg.Wait()
 
-	if batchSize < MaxBatchSize {
-		n.clearBatchTail(batchSize)
+	if len(requests) < rt.batchSize {
+		n.clearBatchTail(rt, len(requests))
 	}
 
 	// EXECUTE INFERENCE
-	err := n.session.Run()
+	err := rt.session.Run()
 	if err != nil {
-		fmt.Printf("CRITICAL: NN Session Run Error: %v\n", err)
-		// Return error to all waiting requests.
-		for _, req := range requests {
-			req.result <- evalResponse{err: err}
-		}
-		return
+		return err
 	}
 
 	n.totalBatches++
-	n.totalItems += int64(batchSize)
+	n.totalItems += int64(len(requests))
 
 	// Post-process: Softmax and convert to fixed color perspective.
 	// KataGomo value logits are [nextPlayerWin, nextPlayerLoss, draw].
 	for i, req := range requests {
 		// Value head raw logits.
-		v := n.value[i*3 : i*3+3]
+		v := rt.value[i*3 : i*3+3]
 
 		maxLogit := v[0]
 		if v[1] > maxLogit {
@@ -382,7 +560,7 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 			LossProb: redWin,
 			Score:    redWin - blackWin,
 		}
-		rawPolicy := n.policy[i*PolicySize : (i+1)*PolicySize]
+		rawPolicy := rt.policy[i*PolicySize : (i+1)*PolicySize]
 		policyForBoard := rawPolicy
 		if req.pos.SideToMove == xionghan.Black {
 			policyForBoard = unflipPolicyY(rawPolicy)
@@ -393,21 +571,86 @@ func (n *NNEvaluator) processBatch(requests []evalRequest) {
 	}
 
 	if n.totalBatches%500 == 0 {
-		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample ValueLogit0=%.4f\n",
-			float64(n.totalItems)/float64(n.totalBatches), n.value[0])
+		last := float32(0)
+		if len(rt.value) > 0 {
+			last = rt.value[0]
+		}
+		fmt.Printf("NN Stats: Avg BatchSize=%.1f, Last Sample ValueLogit0=%.4f, RuntimeBatch=%d\n",
+			float64(n.totalItems)/float64(n.totalBatches), last, rt.batchSize)
 	}
+	return nil
 }
 
-func (n *NNEvaluator) fillOne(batchIdx int, pos *xionghan.Position, stage int, chosenSquare int) {
+func planInferenceBatches(total int, maxBatch int) []int {
+	if total <= 0 || maxBatch <= 0 {
+		return nil
+	}
+	out := make([]int, 0, 8)
+	full := total / maxBatch
+	for i := 0; i < full; i++ {
+		out = append(out, maxBatch)
+	}
+	rem := total % maxBatch
+	if rem > 0 {
+		out = append(out, planTailByRule(rem, maxBatch)...)
+	}
+	return out
+}
+
+func planTailByRule(n int, cap int) []int {
+	if n <= 0 {
+		return nil
+	}
+	if cap <= 1 {
+		return []int{1}
+	}
+	if n >= cap {
+		return []int{cap}
+	}
+
+	half := cap / 2
+	quarter := cap / 4
+	if quarter < 1 {
+		quarter = 1
+	}
+
+	// Rule: if above (half + quarter), pad up to cap.
+	if n > half+quarter {
+		return []int{cap}
+	}
+	// Otherwise split as half + next lower power-of-two padding.
+	if n > half {
+		rem := n - half
+		second := nextPow2(rem)
+		if second > quarter {
+			second = quarter
+		}
+		return []int{half, second}
+	}
+	return planTailByRule(n, half)
+}
+
+func nextPow2(v int) int {
+	if v <= 1 {
+		return 1
+	}
+	p := 1
+	for p < v {
+		p <<= 1
+	}
+	return p
+}
+
+func (n *NNEvaluator) fillOne(rt *nnRuntime, batchIdx int, pos *xionghan.Position, stage int, chosenSquare int) {
 	planeSize := BoardSize * BoardSize
 	spatialOffset := batchIdx * NumSpatialFeatures * planeSize
 	globalOffset := batchIdx * NumGlobalFeatures
 
-	subBin := n.binInput[spatialOffset : spatialOffset+NumSpatialFeatures*planeSize]
+	subBin := rt.binInput[spatialOffset : spatialOffset+NumSpatialFeatures*planeSize]
 	for i := range subBin {
 		subBin[i] = 0
 	}
-	subGlobal := n.globalInput[globalOffset : globalOffset+NumGlobalFeatures]
+	subGlobal := rt.globalInput[globalOffset : globalOffset+NumGlobalFeatures]
 	for i := range subGlobal {
 		subGlobal[i] = 0
 	}
@@ -636,12 +879,12 @@ func unflipPolicyY(raw []float32) []float32 {
 	return out
 }
 
-func (n *NNEvaluator) clearBatchTail(startIdx int) {
+func (n *NNEvaluator) clearBatchTail(rt *nnRuntime, startIdx int) {
 	spatialSize := NumSpatialFeatures * BoardSize * BoardSize
-	for i := startIdx * spatialSize; i < MaxBatchSize*spatialSize; i++ {
-		n.binInput[i] = 0
+	for i := startIdx * spatialSize; i < rt.batchSize*spatialSize; i++ {
+		rt.binInput[i] = 0
 	}
-	for i := startIdx * NumGlobalFeatures; i < MaxBatchSize*NumGlobalFeatures; i++ {
-		n.globalInput[i] = 0
+	for i := startIdx * NumGlobalFeatures; i < rt.batchSize*NumGlobalFeatures; i++ {
+		rt.globalInput[i] = 0
 	}
 }

@@ -474,7 +474,15 @@ async function playMove(mv) {
             })
         });
         if (!res.ok) {
-            console.error("play failed", res.status);
+            const errText = (await res.text()).trim();
+            let tip = `走棋失败: ${errText || ("HTTP " + res.status)}`;
+            if (res.status === 400 && errText === "repetition_forbidden") {
+                tip = "长将提醒：重复局面已达 3 次，这步已被禁止，请换一步。";
+            }
+            const statusEl = document.getElementById("gameStatus");
+            if (statusEl) statusEl.innerText = tip;
+            alert(tip);
+            console.error("play failed", res.status, errText);
             return;
         }
         const data = await res.json();
@@ -507,6 +515,7 @@ async function requestAiMove() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+                game_id: gameId,
                 position: expandFen(currentFen),
                 to_move: sideToMove,
                 max_depth: 1,
@@ -573,5 +582,5 @@ document.addEventListener("DOMContentLoaded", () => {
             newGame();
         });
 
-    newGame();
+    tryResumeGame();
 });

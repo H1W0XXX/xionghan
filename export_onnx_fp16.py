@@ -10,7 +10,7 @@ from load_model import load_model
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Export Xionghan ONNX in fp16/fp32.")
+    parser = argparse.ArgumentParser(description="Export single-file dynamic-batch ONNX in fp16/fp32.")
     parser.add_argument(
         "--checkpoint",
         default="KataGomo/scripts/xionghan/data/train/b15c256/checkpoint.ckpt",
@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "--fixed-batch",
         action="store_true",
-        help="Export fixed batch=1 instead of dynamic batch axis",
+        help="Export fixed batch=1 (not recommended for current Go runtime strategy).",
     )
     return parser.parse_args()
 
@@ -58,12 +58,28 @@ class ExportWrapper(torch.nn.Module):
         return policy, value
 
 
+def convert_onnx_to_fp16_inplace(path):
+    print("CPU environment detected. Converting fp32 ONNX to fp16 via onnxconverter_common...")
+    try:
+        import onnx
+        from onnxconverter_common import float16
+
+        onnx_model = onnx.load(path)
+        onnx_model_fp16 = float16.convert_float_to_float16(onnx_model)
+        onnx.save(onnx_model_fp16, path)
+        print("ONNX fp16 conversion successful.")
+    except ImportError:
+        print("ERROR: Missing required libraries for CPU fp16 conversion.")
+        print("Please run: pip install onnx onnxconverter-common")
+        sys.exit(1)
+
+
 def main():
     args = parse_args()
     print(f"Loading checkpoint: {args.checkpoint}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     model, swa_model, _ = load_model(
         args.checkpoint,
         use_swa=args.use_swa,
@@ -78,7 +94,7 @@ def main():
     wrapper.eval()
     wrapper.to(device)
 
-    # 架构：如果要求 fp16 且有显卡 CUDA，在 PyTorch 层转半精度；若是 CPU 则保持 fp32 进行追踪
+    # If fp16 requested and CUDA is available, trace directly in fp16.
     trace_fp16 = (args.precision == "fp16" and device == "cuda")
     if trace_fp16:
         wrapper = wrapper.half()
@@ -88,7 +104,6 @@ def main():
     print(f"Export precision: {args.precision} on {device} (Tracing in {'fp16' if trace_fp16 else 'fp32'})")
 
     trace_dtype = torch.float16 if trace_fp16 else torch.float32
-    
     dummy_x = torch.randn(1, 25, args.pos_len, args.pos_len, dtype=trace_dtype, device=device)
     dummy_g = torch.randn(1, 19, dtype=trace_dtype, device=device)
 
@@ -100,6 +115,9 @@ def main():
             "policy": {0: "batch_size"},
             "value": {0: "batch_size"},
         }
+        print("Export mode: dynamic batch (recommended for Go runtime buckets 1..512).")
+    else:
+        print("Export mode: fixed batch=1.")
 
     print(f"Exporting ONNX -> {args.output}")
     with torch.no_grad():
@@ -115,21 +133,9 @@ def main():
             dynamic_axes=dynamic_axes,
         )
 
-    # 架构：在 CPU 环境下，将刚才导出的 fp32 ONNX 离线转换为 fp16 并覆盖保存
+    # In CPU environment, convert exported fp32 ONNX to fp16 if requested.
     if args.precision == "fp16" and device == "cpu":
-        print("CPU environment detected. Converting fp32 ONNX to fp16 via onnxconverter_common...")
-        try:
-            import onnx
-            from onnxconverter_common import float16
-            
-            onnx_model = onnx.load(args.output)
-            onnx_model_fp16 = float16.convert_float_to_float16(onnx_model)
-            onnx.save(onnx_model_fp16, args.output)
-            print("ONNX fp16 conversion successful.")
-        except ImportError:
-            print("ERROR: Missing required libraries for CPU fp16 conversion.")
-            print("Please run: pip install onnx onnxconverter-common")
-            sys.exit(1)
+        convert_onnx_to_fp16_inplace(args.output)
 
     size = os.path.getsize(args.output)
     print(f"SUCCESS: {args.output} ({size / 1024 / 1024:.2f} MB)")
