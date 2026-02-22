@@ -42,6 +42,18 @@ func NewEngine() *Engine {
 	}
 }
 
+// CloneForGame creates an engine instance for one game.
+// It keeps independent search caches (TT/blunder/NN cache), but shares NN runtime.
+func (e *Engine) CloneForGame() *Engine {
+	cloned := NewEngine()
+	if e == nil {
+		return cloned
+	}
+	cloned.UseNN = e.UseNN
+	cloned.nn = e.nn
+	return cloned
+}
+
 func (e *Engine) InitNN(modelPath, libPath string) error {
 	nn, err := NewNNEvaluator(modelPath, libPath)
 	if err != nil {

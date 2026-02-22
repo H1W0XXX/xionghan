@@ -473,6 +473,11 @@ async function playMove(mv) {
         });
         if (!res.ok) {
             const errText = (await res.text()).trim();
+            if (res.status === 404 && errText === "game not found") {
+                console.warn("game not found, recreating game");
+                await newGame();
+                return;
+            }
             let tip = `走棋失败: ${errText || ("HTTP " + res.status)}`;
             if (res.status === 400 && errText === "repetition_forbidden") {
                 tip = "长将提醒：重复局面已达 3 次，这步已被禁止，请换一步。";
@@ -525,7 +530,13 @@ async function requestAiMove() {
         btn.disabled = false;
 
         if (!res.ok) {
-            console.error("ai_move failed", res.status);
+            const errText = (await res.text()).trim();
+            if (res.status === 404 && errText === "game not found") {
+                console.warn("game not found on ai_move, recreating game");
+                await newGame();
+                return;
+            }
+            console.error("ai_move failed", res.status, errText);
             return;
         }
 

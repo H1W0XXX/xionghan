@@ -3,10 +3,12 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xionghan/internal/engine"
@@ -17,30 +19,31 @@ import (
 type Game struct {
 	Pos       *xionghan.Position
 	HashCount map[uint64]int
+	Engine    *engine.Engine
+	LastMove  time.Time
 }
 
 var (
 	games   = make(map[string]*Game)
 	gamesMu sync.RWMutex
 
+	gameSeq  uint64
 	aiEngine = engine.NewEngine()
+)
+
+const (
+	gameIdleTTL       = 30 * time.Minute
+	gameCleanupPeriod = 1 * time.Minute
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	startIdleGameJanitor()
 }
 
 func newGameID() string {
-	return time.Now().Format("20060102T150405") + "-" + randomString(6)
-}
-
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
+	seq := atomic.AddUint64(&gameSeq, 1)
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), seq)
 }
 
 // Handler 实现 http.Handler，用于 /api/* 路由
@@ -92,10 +95,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleNewGame(w http.ResponseWriter, r *http.Request) {
 	pos := xionghan.NewInitialPosition()
 	legal := pos.GenerateLegalMoves(false)
+	now := time.Now()
 
 	game := &Game{
 		Pos:       pos,
 		HashCount: map[uint64]int{pos.EnsureHash(): 1},
+		Engine:    aiEngine.CloneForGame(),
+		LastMove:  now,
 	}
 	id := newGameID()
 
@@ -122,6 +128,11 @@ func (h *Handler) handlePlay(w http.ResponseWriter, r *http.Request) {
 	gamesMu.Lock()
 	game, ok := games[req.GameID]
 	if !ok {
+		gamesMu.Unlock()
+		http.Error(w, "game not found", http.StatusNotFound)
+		return
+	}
+	if game == nil || game.Pos == nil {
 		gamesMu.Unlock()
 		http.Error(w, "game not found", http.StatusNotFound)
 		return
@@ -160,6 +171,7 @@ func (h *Handler) handlePlay(w http.ResponseWriter, r *http.Request) {
 	// 更新对局
 	game.Pos = newPos
 	game.HashCount[newPos.EnsureHash()]++
+	touchGameLocked(game)
 	gamesMu.Unlock()
 
 	legal2 := newPos.GenerateLegalMoves(false)
@@ -249,7 +261,7 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 		pos.Hash = pos.CalculateHash()
 	}
 	legalNow := movesToDTO(pos.GenerateLegalMoves(false))
-	historyCount, err := snapshotHashCount(req.GameID)
+	gameEngine, historyCount, err := snapshotGameAIContext(req.GameID)
 	if err != nil {
 		http.Error(w, "game not found", http.StatusNotFound)
 		return
@@ -274,15 +286,15 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ===== 3. 调用搜索，只思考不落子 =====
-	res := aiEngine.Search(pos, cfg)
+	res := gameEngine.Search(pos, cfg)
 
 	// NN 推理失败：本次请求直接失败，不落子不换边。
 	if res.NNFailed {
 		moves := pos.GenerateLegalMoves(true)
-		moves = aiEngine.FilterLeiLockedMoves(pos, moves)
-		moves = aiEngine.FilterUrgentPawnThreatMoves(pos, moves)
-		moves = aiEngine.FilterBlunderMoves(pos, moves)
-		moves = aiEngine.FilterVCFMoves(pos, moves)
+		moves = gameEngine.FilterLeiLockedMoves(pos, moves)
+		moves = gameEngine.FilterUrgentPawnThreatMoves(pos, moves)
+		moves = gameEngine.FilterBlunderMoves(pos, moves)
+		moves = gameEngine.FilterVCFMoves(pos, moves)
 		if shouldEnableRepetitionRule(pos) {
 			filtered := make([]xionghan.Move, 0, len(moves))
 			for _, mv := range moves {
@@ -381,6 +393,13 @@ func ensureGameHashCount(game *Game) {
 	}
 }
 
+func touchGameLocked(game *Game) {
+	if game == nil {
+		return
+	}
+	game.LastMove = time.Now()
+}
+
 func shouldEnableRepetitionRule(pos *xionghan.Position) bool {
 	if pos == nil {
 		return false
@@ -396,26 +415,76 @@ func isRepetitionForbidden(hashCount map[uint64]int, nextPos *xionghan.Position)
 	return hashCount[nextHash]+1 >= 3
 }
 
-func snapshotHashCount(gameID string) (map[uint64]int, error) {
-	gamesMu.RLock()
-	game, ok := games[gameID]
-	if !ok || game == nil || game.Pos == nil {
-		gamesMu.RUnlock()
-		return nil, errors.New("game not found")
-	}
+func copyHashCountLocked(game *Game) map[uint64]int {
 	out := make(map[uint64]int)
+	if game == nil || game.Pos == nil {
+		return out
+	}
 	if game.HashCount != nil && len(game.HashCount) > 0 {
 		out = make(map[uint64]int, len(game.HashCount))
 		for k, v := range game.HashCount {
 			out[k] = v
 		}
-	} else {
-		hash := game.Pos.Hash
-		if hash == 0 {
-			hash = game.Pos.CalculateHash()
-		}
-		out[hash] = 1
+		return out
 	}
-	gamesMu.RUnlock()
-	return out, nil
+	hash := game.Pos.Hash
+	if hash == 0 {
+		hash = game.Pos.CalculateHash()
+	}
+	out[hash] = 1
+	return out
+}
+
+func snapshotGameAIContext(gameID string) (*engine.Engine, map[uint64]int, error) {
+	gamesMu.Lock()
+	game, ok := games[gameID]
+	if !ok || game == nil || game.Pos == nil {
+		gamesMu.Unlock()
+		return nil, nil, errors.New("game not found")
+	}
+	ensureGameHashCount(game)
+	if game.Engine == nil {
+		game.Engine = aiEngine.CloneForGame()
+	}
+	touchGameLocked(game)
+	history := copyHashCountLocked(game)
+	gameEngine := game.Engine
+	gamesMu.Unlock()
+	return gameEngine, history, nil
+}
+
+func startIdleGameJanitor() {
+	go func() {
+		ticker := time.NewTicker(gameCleanupPeriod)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			cleaned := cleanupIdleGames(now)
+			if cleaned > 0 {
+				log.Printf("cleaned %d idle games (ttl=%s)", cleaned, gameIdleTTL)
+			}
+		}
+	}()
+}
+
+func cleanupIdleGames(now time.Time) int {
+	gamesMu.Lock()
+	defer gamesMu.Unlock()
+
+	removed := 0
+	for id, game := range games {
+		if game == nil {
+			delete(games, id)
+			removed++
+			continue
+		}
+		last := game.LastMove
+		if last.IsZero() {
+			last = now
+		}
+		if now.Sub(last) >= gameIdleTTL {
+			delete(games, id)
+			removed++
+		}
+	}
+	return removed
 }
