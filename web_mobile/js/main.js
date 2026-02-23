@@ -516,6 +516,11 @@ async function requestAiMove() {
         btn.innerText = "Thinking...";
         btn.disabled = true;
 
+        const chkMcts = document.getElementById('chkUseMCTS');
+        const rngMcts = document.getElementById('rngMctsSim');
+        const useMcts = chkMcts ? chkMcts.checked : false;
+        const mctsSims = rngMcts ? parseInt(rngMcts.value, 10) : 400;
+
         const res = await fetch("/api/ai_move", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -524,7 +529,9 @@ async function requestAiMove() {
                 position: expandFen(currentFen),
                 to_move: sideToMove,
                 max_depth: 1,
-                time_ms: 5000
+                time_ms: 10000,
+                use_mcts: useMcts,
+                mcts_simulations: mctsSims
             })
         });
 

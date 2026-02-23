@@ -11,7 +11,7 @@ import (
 
 // MCTSNode MCTS 搜索节点
 type MCTSNode struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	Move     xionghan.Move
 	NextPla  xionghan.Side
@@ -47,7 +47,7 @@ const (
 	mctsCpuctExplorationBase = 10000.0
 	mctsCpuctExplorationLog  = 0.45
 	mctsFpuReductionMax      = 0.2
-	mctsContempt             = 0.03 // 稍稍加强进攻偏好
+	mctsContempt             = 0.03
 
 	StateUnevaluated = iota
 	StateEvaluating
@@ -62,6 +62,9 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 	if e.mctsPool == nil {
 		e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
 	}
+	if len(e.mctsPool) > 300000 {
+		e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
+	}
 	root, ok := e.mctsPool[h]
 	if !ok {
 		root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h)
@@ -70,18 +73,25 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 	e.mctsRoot = root
 	e.poolMu.Unlock()
 
+	// 1. 根节点展开：这里保留专家过滤，保证“起手不弱智”
 	if atomic.LoadInt32(&root.State) == StateUnevaluated {
 		res, err := e.nn.Evaluate(pos)
 		if err != nil {
 			e.markNNFailure()
 			return SearchResult{}
 		}
-		e.expandMCTSNode(root, pos, res)
+		// 特殊处理：根节点展开使用 full 模式
+		e.expandMCTSNodeInternal(root, pos, res, true)
 	}
 
 	repBase := newRepetitionState(cfg)
 
+	// 动态线程
 	numThreads := 16
+	if e.nn != nil && (e.nn.selectedProvider == "XNNPACK" || e.nn.selectedProvider == "CPU") {
+		numThreads = 4
+	}
+	
 	simsPerThread := cfg.MCTSSimulations / numThreads
 	if simsPerThread < 1 { simsPerThread = 1 }
 
@@ -90,15 +100,19 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			localRep := repBase.clone()
 			for i := 0; i < simsPerThread; i++ {
 				if cfg.TimeLimit > 0 && time.Since(start) > cfg.TimeLimit {
 					break
 				}
-				e.mctsPlayout(root, pos, cfg, repBase.clone())
+				e.mctsPlayout(root, pos, cfg, localRep)
 			}
 		}()
 	}
 	wg.Wait()
+
+	root.mu.RLock()
+	defer root.mu.RUnlock()
 
 	bestMove := xionghan.Move{}
 	maxVisits := int64(-1)
@@ -108,14 +122,6 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 			maxVisits = v
 			bestMove = mv
 		}
-	}
-
-	// 内存池控制
-	if len(e.mctsPool) > 300000 {
-		e.poolMu.Lock()
-		e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
-		e.mctsPool[h] = root
-		e.poolMu.Unlock()
 	}
 
 	redWinProb := (root.UtilityAvg + 1.0) / 2.0
@@ -172,16 +178,16 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 		if err != nil {
 			utility = node.UtilityAvg
 		} else {
-			e.expandMCTSNode(node, currPos, res)
+			// 2. 内部节点展开：禁用沉重的 Blunder/VCF 过滤，恢复速度
+			e.expandMCTSNodeInternal(node, currPos, res, false)
 			utility = float64(res.LossProb*2.0 - 1.0)
-			
-			// Contempt (平局厌恶)
 			if utility > -0.05 && utility < 0.05 {
 				if currPos.SideToMove == xionghan.Red { utility -= mctsContempt } else { utility += mctsContempt }
 			}
 		}
 	}
 
+	// Backprop
 	for i := len(path) - 1; i >= 0; i-- {
 		n := path[i]
 		n.mu.Lock()
@@ -193,37 +199,32 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 		
 		if i > 0 {
 			atomic.AddInt32(&n.VirtualLosses, -1)
+			if rep.enabled {
+				rep.pop(n.Hash)
+			}
 		}
 	}
 }
 
 func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan.Move, *MCTSNode) {
-	node.mu.Lock()
-	defer node.mu.Unlock()
+	node.mu.RLock()
+	defer node.mu.RUnlock()
 
 	var bestMove xionghan.Move
 	var bestChild *MCTSNode
 	maxPUCT := -1e20
 
-	vis := float64(node.Visits)
+	vis := atomic.LoadInt64(&node.Visits)
 	
 	stdev := math.Sqrt(math.Max(0, node.UtilitySqAvg - node.UtilityAvg*node.UtilityAvg))
 	stdevFactor := 1.0 + 0.5*(stdev/0.4 - 1.0)
 	if stdevFactor < 0.5 { stdevFactor = 0.5 }
 	if stdevFactor > 2.0 { stdevFactor = 2.0 }
 
-	cpuct := (mctsCpuctExploration + mctsCpuctExplorationLog*math.Log((vis+mctsCpuctExplorationBase)/mctsCpuctExplorationBase)) * stdevFactor
-	totalVisitsSqrt := math.Sqrt(vis + 0.01)
+	cpuct := (mctsCpuctExploration + mctsCpuctExplorationLog*math.Log((float64(vis)+mctsCpuctExplorationBase)/mctsCpuctExplorationBase)) * stdevFactor
+	totalVisitsSqrt := math.Sqrt(float64(vis) + 0.01)
 	
-	// --- 对齐 C++: 动态 FPU 逻辑 ---
-	policyProbMassVisited := float32(0)
-	for mv, child := range node.Children {
-		if atomic.LoadInt64(&child.Visits) > 0 {
-			policyProbMassVisited += node.PriorMap[mv]
-		}
-	}
-	// 随探索进度动态缩放的 FPU 减分
-	fpuReduction := mctsFpuReductionMax * math.Sqrt(float64(policyProbMassVisited))
+	fpuReduction := mctsFpuReductionMax * math.Sqrt(math.Max(0, math.Min(1, float64(vis)/100.0)))
 	fpuBase := node.NNValue
 	if node.NextPla == xionghan.Black { fpuBase = -fpuBase }
 	fpuValue := fpuBase - fpuReduction
@@ -242,7 +243,6 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 			if vLoss > 0 {
 				q = (q*v + (-1.0)*vLoss) / childWeight
 			}
-			// Soft Repetition Penalty (软重复惩罚)
 			if rep.enabled && rep.base[child.Hash] > 0 {
 				q -= 0.15 * float64(rep.base[child.Hash])
 			}
@@ -263,29 +263,33 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 	return bestMove, bestChild
 }
 
+// expandMCTSNode 兼容接口
 func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNResult) {
+	e.expandMCTSNodeInternal(node, pos, res, false)
+}
+
+func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, res *NNResult, useFullFilter bool) {
 	if !atomic.CompareAndSwapInt32(&node.State, StateUnevaluated, StateEvaluating) {
 		return
 	}
 
-	// 仅在展开时使用专家规则过滤，确保 MCTS 站在高起点上
 	moves := pos.GenerateLegalMoves(true)
-	moves = e.FilterLeiLockedMoves(pos, moves)
-	moves = e.FilterUrgentPawnThreatMoves(pos, moves)
-	moves = e.FilterBlunderMoves(pos, moves)
-	moves = e.FilterVCFMoves(pos, moves)
+	if useFullFilter {
+		// 只有根节点才跑这些重的过滤
+		moves = e.FilterLeiLockedMoves(pos, moves)
+		moves = e.FilterUrgentPawnThreatMoves(pos, moves)
+		moves = e.FilterBlunderMoves(pos, moves)
+		moves = e.FilterVCFMoves(pos, moves)
+	} else {
+		// 内部节点只跑最轻量的
+		moves = e.FilterLeiLockedMoves(pos, moves)
+	}
 
 	if len(moves) == 0 {
 		node.IsTerminal = true
 		atomic.StoreInt32(&node.State, StateExpanded)
 		return
 	}
-
-	node.mu.Lock()
-	defer node.mu.Unlock()
-
-	node.NNValue = float64(res.LossProb*2.0 - 1.0)
-	node.PriorMap = make(map[xionghan.Move]float32)
 
 	fromGroups := make(map[int][]xionghan.Move)
 	for _, mv := range moves {
@@ -298,7 +302,6 @@ func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNR
 	}
 	resChan := make(chan stage1Res, len(fromGroups))
 	var wg sync.WaitGroup
-
 	for from := range fromGroups {
 		from := from
 		pFrom := res.Policy[from]
@@ -313,19 +316,19 @@ func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNR
 			resChan <- stage1Res{from, r}
 		}()
 	}
-
 	go func() {
 		wg.Wait()
 		close(resChan)
 	}()
 
+	priorMap := make(map[xionghan.Move]float32)
 	totalP := float32(0)
 	type childInfo struct {
 		mv   xionghan.Move
 		hash uint64
 		p    float32
 	}
-	var children []childInfo
+	var childrenInfo []childInfo
 
 	for r := range resChan {
 		fromMoves := fromGroups[r.from]
@@ -338,30 +341,32 @@ func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNR
 				p = pFrom * r.res.Policy[mv.To]
 			}
 			
+			// 虽然 ApplyMove 有点慢，但为了转置表（Transposition）这是必须的
+			// 我们已经移除了内部节点的 VCF/Blunder，速度应该能接受了
 			nextPos, ok := pos.ApplyMove(mv)
 			if !ok { continue }
 			
-			// 显著加强进攻导向 (Prior Biasing)
-			if pos.Board.Squares[mv.To] != 0 { p *= 1.5 }
-			if e.CanCaptureKingNext(nextPos) { p *= 2.0 }
-
-			children = append(children, childInfo{mv, nextPos.EnsureHash(), p})
-			node.PriorMap[mv] = p
+			childrenInfo = append(childrenInfo, childInfo{mv, nextPos.EnsureHash(), p})
+			priorMap[mv] = p
 			totalP += p
 		}
 	}
 
 	if totalP > 0 {
 		inv := 1.0 / totalP
-		for mv := range node.PriorMap {
-			node.PriorMap[mv] *= inv
+		for mv := range priorMap {
+			priorMap[mv] *= inv
 		}
 	}
 
+	node.mu.Lock()
+	node.NNValue = float64(res.LossProb*2.0 - 1.0)
+	node.PriorMap = priorMap
+	
 	nextPla := xionghan.Black
 	if node.NextPla == xionghan.Black { nextPla = xionghan.Red }
 	
-	for _, ci := range children {
+	for _, ci := range childrenInfo {
 		e.poolMu.Lock()
 		childNode, ok := e.mctsPool[ci.hash]
 		if !ok {
@@ -371,5 +376,7 @@ func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNR
 		node.Children[ci.mv] = childNode
 		e.poolMu.Unlock()
 	}
+	node.mu.Unlock()
+	
 	atomic.StoreInt32(&node.State, StateExpanded)
 }

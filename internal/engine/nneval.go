@@ -77,6 +77,8 @@ type NNEvaluator struct {
 	maxBatch int
 	queue    chan evalRequest
 
+	selectedProvider string // 导出供 MCTS 调度使用
+
 	// Stats
 	totalItems   int64
 	totalBatches int64
@@ -249,9 +251,10 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	}
 
 	n := &NNEvaluator{
-		runtimes: runtimes,
-		maxBatch: maxBatch,
-		queue:    make(chan evalRequest, maxBatch*10),
+		runtimes:         runtimes,
+		maxBatch:         maxBatch,
+		selectedProvider: selectedProvider,
+		queue:            make(chan evalRequest, maxBatch*10),
 	}
 
 	go n.batchLoop()

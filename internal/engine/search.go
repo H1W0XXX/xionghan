@@ -391,8 +391,8 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 	if len(children) == 1 {
 		local := &Engine{
 			tt:             make(map[uint64]ttEntry, 1<<14),
-			blunderTT:      make(map[uint64]uint8, 1<<13),
-			blunderReplyTT: make(map[uint64]uint8, 1<<13),
+			blunderTT:      make([]uint64, 1<<13),
+			blunderReplyTT: make([]uint64, 1<<13),
 			nn:             e.nn,
 			UseNN:          e.UseNN,
 			nnAbort:        e.nnAbort,
@@ -424,8 +424,8 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			// 每个 goroutine 用自己的 Engine/TT，避免加锁和 map 竞争
 			local := &Engine{
 				tt:             make(map[uint64]ttEntry, 1<<14),
-				blunderTT:      make(map[uint64]uint8, 1<<13),
-				blunderReplyTT: make(map[uint64]uint8, 1<<13),
+				blunderTT:      make([]uint64, 1<<13),
+				blunderReplyTT: make([]uint64, 1<<13),
 				nn:             e.nn,
 				UseNN:          e.UseNN,
 				nnAbort:        e.nnAbort,

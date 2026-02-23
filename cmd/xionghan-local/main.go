@@ -3,13 +3,13 @@ package main
 import (
 	"flag"
 	"log"
-	"net"
 	"net/http"
 	// _ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	httpserver "xionghan/internal/server/http"
@@ -27,7 +27,7 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 
-	_ = cmd.Start() // 不阻塞，不关心错误（某些服务器环境可能无图形界面）
+	_ = cmd.Start()
 }
 
 func resolveExistingDir(dir string) string {
@@ -98,17 +98,16 @@ func main() {
 
 	log.Printf("listening on %s, serving desktop static from %s, mobile static from %s", *addr, *webDir, *webMobileDir)
 
-	// ⭐ 延迟 100ms 打开默认浏览器，否则可能服务器未启动完成
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		// 自动从 addr 提取端口部分，例如 "0.0.0.0:2888" -> "2888"
-		_, port, err := net.SplitHostPort(*addr)
-		if err != nil {
-			// 如果 addr 格式不标准（比如只有 ":2888"），降级处理
-			openBrowser("http://127.0.0.1:2888")
-		} else {
-			openBrowser("http://127.0.0.1:" + port)
+		time.Sleep(200 * time.Millisecond)
+		// 使用最原始的字符串替换，不碰 net 包
+		url := "http://127.0.0.1:2888"
+		if strings.Contains(*addr, ":") {
+			parts := strings.Split(*addr, ":")
+			port := parts[len(parts)-1]
+			url = "http://127.0.0.1:" + port
 		}
+		openBrowser(url)
 	}()
 
 	if err := http.ListenAndServe(*addr, mux); err != nil {

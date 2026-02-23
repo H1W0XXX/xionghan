@@ -16,8 +16,9 @@ type Engine struct {
 	tt    map[uint64]ttEntry // TT 移到 tt.go定义
 	nodes int64
 
-	blunderTT      map[uint64]uint8
-	blunderReplyTT map[uint64]uint8
+	// 无锁置换表：使用固定大小数组代替 map
+	blunderTT      []uint64
+	blunderReplyTT []uint64
 
 	UseNN bool
 	nn    *NNEvaluator
@@ -38,8 +39,8 @@ func NewEngine() *Engine {
 	abort := uint32(0)
 	return &Engine{
 		tt:             make(map[uint64]ttEntry, 1<<18),
-		blunderTT:      make(map[uint64]uint8, 1<<16),
-		blunderReplyTT: make(map[uint64]uint8, 1<<16),
+		blunderTT:      make([]uint64, 1<<18),
+		blunderReplyTT: make([]uint64, 1<<18),
 		nnAbort:        &abort,
 		nnCache: &nnEvalCache{
 			m: make(map[uint64]int, 1<<18),

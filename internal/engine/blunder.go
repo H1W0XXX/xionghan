@@ -1,6 +1,9 @@
 package engine
 
-import "xionghan/internal/xionghan"
+import (
+	"sync/atomic"
+	"xionghan/internal/xionghan"
+)
 
 const (
 	blunderUnknown uint8 = iota
@@ -16,11 +19,9 @@ const (
 const (
 	blunderMoveSalt  uint64 = 0x9e3779b97f4a7c15
 	blunderReplySalt uint64 = 0xc2b2ae3d27d4eb4f
-	blunderTTCap            = 1_000_000
 )
 
-// FilterBlunderMoves 过滤“纯送子”弱智步：
-// 仅针对车/炮/马/檑/兵，且本步不吃子、不将军。
+// FilterBlunderMoves 过滤“纯送子”弱智步
 func (e *Engine) FilterBlunderMoves(pos *xionghan.Position, moves []xionghan.Move) []xionghan.Move {
 	if len(moves) <= 1 {
 		return moves
@@ -42,19 +43,26 @@ func (e *Engine) FilterBlunderMoves(pos *xionghan.Position, moves []xionghan.Mov
 
 func (e *Engine) shouldPruneBlunderMove(pos *xionghan.Position, mv xionghan.Move) bool {
 	key := blunderMoveKey(pos, mv)
-	if v, ok := e.blunderTT[key]; ok {
-		return v == blunderPrune
+	mask := uint64(len(e.blunderTT) - 1)
+	idx := key & mask
+
+	// 原子读取 (Lock-free)
+	entry := atomic.LoadUint64(&e.blunderTT[idx])
+	// 校验 key (高 56 位)
+	if (entry >> 8) == (key >> 8) {
+		return uint8(entry&0xFF) == blunderPrune
 	}
 
 	prune := e.computeBlunderPrune(pos, mv)
-	if len(e.blunderTT) > blunderTTCap {
-		e.blunderTT = make(map[uint64]uint8, 1<<16)
-	}
+	
+	// 原子写入 (总是覆盖)
+	val := blunderKeep
 	if prune {
-		e.blunderTT[key] = blunderPrune
-	} else {
-		e.blunderTT[key] = blunderKeep
+		val = blunderPrune
 	}
+	newEntry := (key & 0xFFFFFFFFFFFFFF00) | uint64(val)
+	atomic.StoreUint64(&e.blunderTT[idx], newEntry)
+	
 	return prune
 }
 
@@ -76,7 +84,6 @@ func (e *Engine) computeBlunderPrune(pos *xionghan.Position, mv xionghan.Move) b
 	if !ok {
 		return false
 	}
-	// 将军步不在“纯送子”过滤范围。
 	if nextPos.IsInCheck(nextPos.SideToMove) {
 		return false
 	}
@@ -95,29 +102,32 @@ func (e *Engine) computeBlunderPrune(pos *xionghan.Position, mv xionghan.Move) b
 		if !ok {
 			continue
 		}
-		// 只要对手存在一条吃回分支，让我方“既不能回吃也不能将军”，就视为纯送子。
 		if !e.hasRecaptureOrCheck(afterCapture, mv.To) {
 			return true
 		}
 	}
 
-	// 对手没法立刻吃掉该子，或所有吃回都能被我方立即反制，不算纯送子。
 	return false
 }
 
 func (e *Engine) hasRecaptureOrCheck(pos *xionghan.Position, targetSq int) bool {
 	key := blunderReplyKey(pos, targetSq)
-	if v, ok := e.blunderReplyTT[key]; ok {
-		return v == blunderReplyHasComp
+	mask := uint64(len(e.blunderReplyTT) - 1)
+	idx := key & mask
+
+	entry := atomic.LoadUint64(&e.blunderReplyTT[idx])
+	if (entry >> 8) == (key >> 8) {
+		return uint8(entry&0xFF) == blunderReplyHasComp
 	}
 
 	moves := pos.GenerateLegalMoves(false)
+	hasComp := false
 	for _, mv := range moves {
 		if mv.To == targetSq {
 			dst := pos.Board.Squares[targetSq]
 			if dst != 0 && dst.Side() != pos.SideToMove {
-				e.storeBlunderReply(key, true)
-				return true
+				hasComp = true
+				break
 			}
 		}
 
@@ -127,28 +137,24 @@ func (e *Engine) hasRecaptureOrCheck(pos *xionghan.Position, targetSq int) bool 
 		}
 		target := pos.Board.Squares[mv.To]
 		if target != 0 && target.Type() == xionghan.PieceKing {
-			e.storeBlunderReply(key, true)
-			return true
+			hasComp = true
+			break
 		}
 		if after.IsInCheck(after.SideToMove) {
-			e.storeBlunderReply(key, true)
-			return true
+			hasComp = true
+			break
 		}
 	}
 
-	e.storeBlunderReply(key, false)
-	return false
-}
-
-func (e *Engine) storeBlunderReply(key uint64, hasComp bool) {
-	if len(e.blunderReplyTT) > blunderTTCap {
-		e.blunderReplyTT = make(map[uint64]uint8, 1<<16)
-	}
+	// 存入 (无锁写入)
+	val := blunderReplyNoComp
 	if hasComp {
-		e.blunderReplyTT[key] = blunderReplyHasComp
-	} else {
-		e.blunderReplyTT[key] = blunderReplyNoComp
+		val = blunderReplyHasComp
 	}
+	newEntry := (key & 0xFFFFFFFFFFFFFF00) | uint64(val)
+	atomic.StoreUint64(&e.blunderReplyTT[idx], newEntry)
+	
+	return hasComp
 }
 
 func isBlunderFilterPiece(pt xionghan.PieceType) bool {

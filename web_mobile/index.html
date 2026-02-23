@@ -15,8 +15,9 @@
             padding: 0;
             display: flex;
             justify-content: center;
-            align-items: center;
-            height: 100vh;
+            align-items: flex-start; /* 改为从顶部对齐 */
+            min-height: 100vh;       /* 允许内容超过一屏 */
+            padding-top: 30px;       /* 顶部留白，防止被遮挡 */
             background: #222;
             color: #eee;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -172,11 +173,29 @@
             <div class="stat-label">搜索深度 / 节点</div>
             <div id="searchInfo" class="stat-value">- / -</div>
         </div>
+        <div class="stat-box" style="grid-column: span 2;">
+            <div class="stat-label">AI 搜索配置</div>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; gap: 5px;">
+                    <input type="checkbox" id="chkUseMCTS" checked>
+                    <label for="chkUseMCTS" style="font-size: 13px; margin: 0;">MCTS</label>
+                </div>
+                <div style="font-size: 12px; color: #eee;">仿真: <span id="mctsSimValue">400</span></div>
+            </div>
+            <input type="range" id="rngMctsSim" min="100" max="1000" step="100" value="400" style="width: 100%; margin: 0;">
+        </div>
         <button id="btnAiMove">AI Move</button>
         <button id="btnNewGame" style="background: #666; margin-top: 10px;">New Game</button>
     </div>
 </div>
 
 <script src="js/main.js"></script>
+<script>
+    const rng = document.getElementById('rngMctsSim');
+    const val = document.getElementById('mctsSimValue');
+    rng.addEventListener('input', () => {
+        val.innerText = rng.value;
+    });
+</script>
 </body>
 </html>
