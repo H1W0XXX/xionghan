@@ -27,6 +27,11 @@ type Engine struct {
 
 	// Shared NN value cache keyed by position hash.
 	nnCache *nnEvalCache
+
+	// MCTS 持久化状态
+	mctsRoot *MCTSNode
+	mctsPool map[uint64]*MCTSNode
+	poolMu   sync.Mutex
 }
 
 func NewEngine() *Engine {

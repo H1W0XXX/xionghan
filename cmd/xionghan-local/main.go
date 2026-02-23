@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	// _ "net/http/pprof"
 	"os"
@@ -100,7 +101,14 @@ func main() {
 	// ⭐ 延迟 100ms 打开默认浏览器，否则可能服务器未启动完成
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		openBrowser("http://127.0.0.1" + *addr)
+		// 自动从 addr 提取端口部分，例如 "0.0.0.0:2888" -> "2888"
+		_, port, err := net.SplitHostPort(*addr)
+		if err != nil {
+			// 如果 addr 格式不标准（比如只有 ":2888"），降级处理
+			openBrowser("http://127.0.0.1:2888")
+		} else {
+			openBrowser("http://127.0.0.1:" + port)
+		}
 	}()
 
 	if err := http.ListenAndServe(*addr, mux); err != nil {

@@ -9,6 +9,10 @@ type AiMoveRequest struct {
 	ToMove   int    `json:"to_move"`  // 0=红, 1=黑（或绿），和你 sideToInt 对应
 	MaxDepth int    `json:"max_depth"`
 	TimeMs   int64  `json:"time_ms"`
+
+	// MCTS 相关的参数
+	UseMCTS         bool `json:"use_mcts"`
+	MCTSSimulations int  `json:"mcts_simulations"`
 }
 
 // 前端用的招法结构

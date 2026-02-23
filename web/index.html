@@ -163,11 +163,37 @@
             <div class="stat-label">搜索深度 / 节点</div>
             <div id="searchInfo" class="stat-value">- / -</div>
         </div>
+        <div class="stat-box">
+            <div class="stat-label">AI 搜索配置</div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                <input type="checkbox" id="chkUseMCTS" checked>
+                <label for="chkUseMCTS" style="font-size: 14px;">使用 MCTS</label>
+            </div>
+            <div id="mctsSimContainer">
+                <div class="stat-label">MCTS 仿真次数: <span id="mctsSimValue">800</span></div>
+                <input type="range" id="rngMctsSim" min="100" max="2000" step="100" value="800" style="width: 100%;">
+            </div>
+        </div>
         <button id="btnAiMove">AI Move</button>
         <button id="btnNewGame" style="background: #666; margin-top: 10px;">New Game</button>
     </div>
 </div>
 
 <script src="js/main.js"></script>
+<script>
+    const rng = document.getElementById('rngMctsSim');
+    const val = document.getElementById('mctsSimValue');
+    const chk = document.getElementById('chkUseMCTS');
+    const simContainer = document.getElementById('mctsSimContainer');
+
+    rng.addEventListener('input', () => {
+        val.innerText = rng.value;
+    });
+
+    chk.addEventListener('change', () => {
+        simContainer.style.opacity = chk.checked ? '1' : '0.4';
+        simContainer.style.pointerEvents = chk.checked ? 'auto' : 'none';
+    });
+</script>
 </body>
 </html>

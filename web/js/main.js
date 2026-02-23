@@ -510,9 +510,17 @@ async function requestAiMove() {
     if (!currentFen) return;
     try {
         const btn = document.getElementById("btnAiMove");
-        const originalText = btn.innerText;
-        btn.innerText = "Thinking...";
-        btn.disabled = true;
+        let originalText = "";
+        if (btn) {
+            originalText = btn.innerText;
+            btn.innerText = "Thinking...";
+            btn.disabled = true;
+        }
+
+        const chkMcts = document.getElementById('chkUseMCTS');
+        const rngMcts = document.getElementById('rngMctsSim');
+        const useMcts = chkMcts ? chkMcts.checked : false;
+        const mctsSims = rngMcts ? parseInt(rngMcts.value, 10) : 800;
 
         const res = await fetch("/api/ai_move", {
             method: "POST",
@@ -522,12 +530,16 @@ async function requestAiMove() {
                 position: expandFen(currentFen),
                 to_move: sideToMove,
                 max_depth: 2,
-                time_ms: 5000
+                time_ms: 10000, // 给 MCTS 稍微多一点时间
+                use_mcts: useMcts,
+                mcts_simulations: mctsSims
             })
         });
 
-        btn.innerText = originalText;
-        btn.disabled = false;
+        if (btn) {
+            btn.innerText = originalText;
+            btn.disabled = false;
+        }
 
         if (!res.ok) {
             const errText = (await res.text()).trim();
@@ -581,15 +593,17 @@ function updateUiStats(data) {
 document.addEventListener("DOMContentLoaded", () => {
 
     const boardSvg = document.getElementById("boardSvg");
-    boardSvg.addEventListener("click", onBoardClick);
+    if (boardSvg) boardSvg.addEventListener("click", onBoardClick);
 
-    document.getElementById("btnAiMove")
-        .addEventListener("click", requestAiMove);
+    const btnAi = document.getElementById("btnAiMove");
+    if (btnAi) btnAi.addEventListener("click", requestAiMove);
 
-    document.getElementById("btnNewGame")
-        .addEventListener("click", () => {
+    const btnNew = document.getElementById("btnNewGame");
+    if (btnNew) {
+        btnNew.addEventListener("click", () => {
             if(confirm("Start a new game?")) newGame();
         });
+    }
 
     tryResumeGame();
 });

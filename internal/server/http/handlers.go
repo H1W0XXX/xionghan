@@ -283,6 +283,8 @@ func (h *Handler) handleAiMove(w http.ResponseWriter, r *http.Request) {
 		EnableRepetitionFilter: shouldEnableRepetitionRule(pos),
 		RepetitionCount:        historyCount,
 		RepetitionBanCount:     3,
+		UseMCTS:                req.UseMCTS,
+		MCTSSimulations:        req.MCTSSimulations,
 	}
 
 	// ===== 3. 调用搜索，只思考不落子 =====

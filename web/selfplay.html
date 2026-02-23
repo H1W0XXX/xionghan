@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>自对弈控制台 - 匈汉象棋</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+        body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #1a1a1a; color: #eee; font-family: sans-serif; }
+        #container { display: flex; flex-direction: row; gap: 20px; padding: 20px; height: 90vh; width: 95vw; }
+        #boardArea { flex: 1; display: flex; justify-content: center; align-items: center; background: #222; border-radius: 12px; position: relative; }
+        #boardSvg { width: 95%; height: 95%; }
+        #sidebar { width: 350px; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; padding-right: 10px; }
+        .control-group { background: #333; padding: 15px; border-radius: 8px; border: 1px solid #444; }
+        .side-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; padding-bottom: 5px; border-bottom: 2px solid #555; }
+        .red-side { border-left: 4px solid #c33; }
+        .black-side { border-left: 4px solid #3c3; }
+        label { display: block; font-size: 12px; color: #aaa; margin-top: 8px; }
+        select, input[type="range"] { width: 100%; margin-top: 4px; }
+        .btn-row { display: flex; gap: 10px; margin-top: 10px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        #btnStart { background: #4a6; color: white; }
+        #btnPause { background: #f90; color: white; }
+        #btnStop { background: #d33; color: white; }
+        button:disabled { opacity: 0.3; cursor: not-allowed; }
+        .log-area { flex: 1; background: #000; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; overflow-y: auto; color: #0f0; margin-top: 10px; }
+        .stat-val { color: #fff; font-weight: bold; }
+    </style>
+</head>
+<body>
+<div id="container">
+    <div id="boardArea">
+        <svg id="boardSvg" viewBox="0 0 1300 1300" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <!-- 改为本地引用，配合下面的 fetch 注入 -->
+            <use href="#board-xionghan"></use>
+            <g id="piecesLayer"></g>
+            <g id="highlightLayer"></g>
+        </svg>
+    </div>
+
+    <div id="sidebar">
+        <div class="control-group red-side">
+            <div class="side-title">红方 (Red Player)</div>
+            <label>搜索算法</label>
+            <select id="redAlgo">
+                <option value="ab">Alpha-Beta 剪枝</option>
+                <option value="mcts" selected>MCTS 蒙特卡洛</option>
+            </select>
+            <label>深度 / 仿真次数: <span id="redValLabel">200</span></label>
+            <input type="range" id="redVal" min="1" max="10000" value="200">
+        </div>
+
+        <div class="control-group black-side">
+            <div class="side-title">黑方 (Black Player)</div>
+            <label>搜索算法</label>
+            <select id="blackAlgo">
+                <option value="ab" selected>Alpha-Beta 剪枝</option>
+                <option value="mcts">MCTS 蒙特卡洛</option>
+            </select>
+            <label>深度 / 仿真次数: <span id="blackValLabel">1</span></label>
+            <input type="range" id="blackVal" min="1" max="10000" value="1">
+        </div>
+
+        <div class="control-group">
+            <div class="side-title">全局控制</div>
+            <label>每步间隔 (ms)</label>
+            <input type="number" id="stepDelay" value="500" style="width: 60px;">
+            <div class="btn-row">
+                <button id="btnStart">开始对弈</button>
+                <button id="btnPause" disabled>暂停</button>
+                <button id="btnStop" disabled>终止</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <div class="stat-label">当前步数: <span id="moveCount" class="stat-val">0</span></div>
+            <div class="stat-label">轮到: <span id="sideToMove" class="stat-val">-</span></div>
+        </div>
+
+        <div id="log" class="log-area">等待开始...</div>
+    </div>
+</div>
+
+<!-- 借用主页的 SVG 符号 -->
+<div id="svgContainer" style="display:none"></div>
+
+<script src="js/main.js"></script>
+<script src="js/selfplay.js"></script>
+<script>
+    // 动态加载主页的 SVG Symbols
+    fetch('index.html').then(r => r.text()).then(html => {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        // 找到 index.html 中那个包含 symbol 的隐藏 svg
+        const sourceSvg = doc.querySelector('body > svg[style*="display:none"]');
+        if (sourceSvg) {
+            const container = document.getElementById('svgContainer');
+            container.innerHTML = sourceSvg.outerHTML;
+            // 强制重新渲染一次 use 标签（某些浏览器在 symbol 注入后需要触发更新）
+            const useTag = document.querySelector('#boardSvg use');
+            if (useTag) {
+                const href = useTag.getAttribute('href');
+                useTag.setAttribute('href', '');
+                useTag.setAttribute('href', href);
+            }
+        }
+    });
+
+    // 滑块数值联动
+    ['red', 'black'].forEach(s => {
+        const rng = document.getElementById(s + 'Val');
+        const lbl = document.getElementById(s + 'ValLabel');
+        const sel = document.getElementById(s + 'Algo');
+        
+        const update = () => {
+            lbl.innerText = rng.value;
+            if(sel.value === 'ab') {
+                rng.max = 4; // AB 深度别太高
+                if(rng.value > 4) rng.value = 2;
+            } else {
+                rng.max = 10000;
+            }
+            lbl.innerText = rng.value;
+        };
+        rng.oninput = update;
+        sel.onchange = update;
+        update();
+    });
+</script>
+</body>
+</html>

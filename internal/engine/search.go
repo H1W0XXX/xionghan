@@ -32,6 +32,10 @@ type SearchConfig struct {
 	EnableRepetitionFilter bool           // 是否启用重复局面禁手（搜索阶段）
 	RepetitionCount        map[uint64]int // 局面历史计数（包含当前局面）
 	RepetitionBanCount     int            // 达到该次数后禁手（例如 3）
+
+	// MCTS 相关的参数
+	UseMCTS         bool // 是否使用 MCTS 搜索
+	MCTSSimulations int  // MCTS 仿真次数（Playouts）
 }
 
 // 搜索结果
@@ -132,6 +136,11 @@ func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) [
 // 根节点搜索：带简单迭代加深（根节点内部并行）
 func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	e.resetNNAbort()
+
+	if cfg.UseMCTS && cfg.MCTSSimulations > 0 {
+		return e.runMCTS(pos, cfg)
+	}
+
 	rep := newRepetitionState(cfg)
 
 	// 1. 绝杀判定：直接吃王
@@ -180,6 +189,11 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		}
 	}
 skipVCFShortcut:
+
+	// 3. 如果启用了 MCTS 搜索，在排除掉直接绝杀后，进入 MCTS
+	if cfg.UseMCTS && cfg.MCTSSimulations > 0 {
+		return e.runMCTS(pos, cfg)
+	}
 
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = 3
