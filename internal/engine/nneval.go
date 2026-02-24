@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 	"xionghan/internal/xionghan"
@@ -161,41 +162,93 @@ func NewNNEvaluator(modelPath string, libPath string) (*NNEvaluator, error) {
 	providers := []struct {
 		name  string
 		setup func(*ort.SessionOptions) error
-	}{
-		{"XNNPACK", func(so *ort.SessionOptions) error {
-			return so.AppendExecutionProviderXNNPACK(map[string]string{
-				"intra_op_num_threads": "4",
-			})
-		}},
-		{"TensorRT", func(so *ort.SessionOptions) error {
-			trtOpts, e := ort.NewTensorRTProviderOptions()
-			if e != nil {
-				return e
-			}
-			defer trtOpts.Destroy()
-			trtOpts.Update(map[string]string{
-				"device_id":               "0",
-				"trt_engine_cache_enable": "1",
-				"trt_engine_cache_path":   absCachePath,
-				"trt_fp16_enable":         "1",
-				"trt_max_workspace_size":  "2147483648",
-				"trt_timing_cache_enable": "1",
-				"trt_timing_cache_path":   absCachePath,
-			})
-			return so.AppendExecutionProviderTensorRT(trtOpts)
-		}},
-		{"CUDA", func(so *ort.SessionOptions) error {
-			cudaOpts, e := ort.NewCUDAProviderOptions()
-			if e != nil {
-				return e
-			}
-			defer cudaOpts.Destroy()
-			return so.AppendExecutionProviderCUDA(cudaOpts)
-		}},
-		{"DirectML", func(so *ort.SessionOptions) error {
-			return so.AppendExecutionProviderDirectML(0)
-		}},
-		{"CPU", func(so *ort.SessionOptions) error { return nil }},
+	}{}
+	if runtime.GOOS == "darwin" {
+		providers = append(providers,
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{
+				"CoreML",
+				func(so *ort.SessionOptions) error {
+					// Prefer CoreMLV2, fallback to legacy API for older ORT builds.
+					if e := so.AppendExecutionProviderCoreMLV2(map[string]string{}); e == nil {
+						return nil
+					}
+					return so.AppendExecutionProviderCoreML(0)
+				},
+			},
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{"CPU", func(so *ort.SessionOptions) error { return nil }},
+		)
+	} else if runtime.GOOS == "windows" {
+		providers = append(providers,
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{
+				"TensorRT",
+				func(so *ort.SessionOptions) error {
+					trtOpts, e := ort.NewTensorRTProviderOptions()
+					if e != nil {
+						return e
+					}
+					defer trtOpts.Destroy()
+					trtOpts.Update(map[string]string{
+						"device_id":               "0",
+						"trt_engine_cache_enable": "1",
+						"trt_engine_cache_path":   absCachePath,
+						"trt_fp16_enable":         "1",
+						"trt_max_workspace_size":  "2147483648",
+						"trt_timing_cache_enable": "1",
+						"trt_timing_cache_path":   absCachePath,
+					})
+					return so.AppendExecutionProviderTensorRT(trtOpts)
+				},
+			},
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{
+				"CUDA",
+				func(so *ort.SessionOptions) error {
+					cudaOpts, e := ort.NewCUDAProviderOptions()
+					if e != nil {
+						return e
+					}
+					defer cudaOpts.Destroy()
+					return so.AppendExecutionProviderCUDA(cudaOpts)
+				},
+			},
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{"DirectML", func(so *ort.SessionOptions) error { return so.AppendExecutionProviderDirectML(0) }},
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{"CPU", func(so *ort.SessionOptions) error { return nil }},
+		)
+	} else {
+		providers = append(providers,
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{
+				"XNNPACK",
+				func(so *ort.SessionOptions) error {
+					return so.AppendExecutionProviderXNNPACK(map[string]string{
+						"intra_op_num_threads": "4",
+					})
+				},
+			},
+			struct {
+				name  string
+				setup func(*ort.SessionOptions) error
+			}{"CPU", func(so *ort.SessionOptions) error { return nil }},
+		)
 	}
 
 	var runtimes []*nnRuntime

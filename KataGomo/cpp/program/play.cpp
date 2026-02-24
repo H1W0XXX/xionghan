@@ -9,6 +9,7 @@
 #include "../search/searchnode.h"
 #include "../dataio/files.h"
 #include "../game/randomopening.h"
+#include "../game/gamelogic.h"
 
 #include "../core/test.h"
 
@@ -1115,6 +1116,35 @@ static Loc runBotWithLimits(
   return loc;
 }
 
+struct CompletedTurnState {
+  Board board;
+  Hash128 repetitionHash;
+  Player mover;
+  bool gaveCheck;
+};
+
+static Hash128 repetitionHashIgnoringMoveNum(const Board& board) {
+  if(board.movenum >= 0 && board.movenum < MAX_MOVE_NUM)
+    return board.pos_hash ^ Board::ZOBRIST_MOVENUM_HASH[board.movenum];
+  return board.pos_hash;
+}
+
+static bool sameRepetitionState(const Board& a, const Board& b) {
+  if(a.x_size != b.x_size || a.y_size != b.y_size)
+    return false;
+  if(a.stage != b.stage || a.nextPla != b.nextPla)
+    return false;
+  for(int i = 0; i<STAGE_NUM_EACH_PLA; i++) {
+    if(a.midLocs[i] != b.midLocs[i])
+      return false;
+  }
+  for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+    if(a.colors[i] != b.colors[i])
+      return false;
+  }
+  return true;
+}
+
 
 //Run a game between two bots. It is OK if both bots are the same bot.
 FinishedGameData* Play::runGame(
@@ -1266,8 +1296,18 @@ FinishedGameData* Play::runGame(
   vector<double> historicalMctsWinLossValues;
   vector<double> historicalMctsDrawValues;
   vector<ReportedSearchValues> rawNNValues;
+  vector<CompletedTurnState> completedTurnStates;
 
   ClockTimer timer;
+
+  if(playSettings.forSelfPlay && board.stage == 0) {
+    CompletedTurnState initialState;
+    initialState.board = board;
+    initialState.repetitionHash = repetitionHashIgnoringMoveNum(board);
+    initialState.mover = C_EMPTY;
+    initialState.gaveCheck = false;
+    completedTurnStates.push_back(initialState);
+  }
 
   //Main play loop
   for(int i = 0; i<maxMovesPerGame; i++) {
@@ -1401,8 +1441,54 @@ FinishedGameData* Play::runGame(
     assert(hist.isLegal(board,loc,pla));
     hist.makeBoardMoveAssumeLegal(board,loc,pla);
 
+    if(
+      playSettings.forSelfPlay &&
+      !hist.isGameFinished &&
+      board.stage == 0
+    ) {
+      const Player mover = pla;
+      const bool gaveCheck = GameLogic::isInCheck(board, board.nextPla);
+      const Hash128 repHash = repetitionHashIgnoringMoveNum(board);
+
+      if(gaveCheck) {
+        for(int prevIdx = (int)completedTurnStates.size() - 1; prevIdx >= 0; prevIdx--) {
+          const CompletedTurnState& prevState = completedTurnStates[prevIdx];
+          if(prevState.repetitionHash != repHash)
+            continue;
+          if(!sameRepetitionState(prevState.board, board))
+            continue;
+
+          bool allOwnMovesWereChecks = true;
+          int ownCheckingMoves = 1; //Current move
+          for(int k = prevIdx + 1; k < (int)completedTurnStates.size(); k++) {
+            const CompletedTurnState& s = completedTurnStates[k];
+            if(s.mover == mover) {
+              if(!s.gaveCheck) {
+                allOwnMovesWereChecks = false;
+                break;
+              }
+              ownCheckingMoves += 1;
+            }
+          }
+
+          // Third occurrence of a repeated checking cycle -> long check loses in selfplay.
+          if(allOwnMovesWereChecks && ownCheckingMoves >= 2) {
+            hist.setWinner(getOpp(mover));
+            break;
+          }
+        }
+      }
+
+      CompletedTurnState currentState;
+      currentState.board = board;
+      currentState.repetitionHash = repHash;
+      currentState.mover = mover;
+      currentState.gaveCheck = gaveCheck;
+      completedTurnStates.push_back(currentState);
+    }
+
     //Check for resignation
-    if(playSettings.allowResignation && historicalMctsWinLossValues.size() >= playSettings.resignConsecTurns) {
+    if(!hist.isGameFinished && playSettings.allowResignation && historicalMctsWinLossValues.size() >= playSettings.resignConsecTurns) {
       //Play at least some moves no matter what
       int minTurnForResignation = 1 + board.x_size * board.y_size / 5;
       if(i >= minTurnForResignation) {
