@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,28 +18,32 @@ type MCTSNode struct {
 	NextPla  xionghan.Side
 	Parent   *MCTSNode
 	Children map[xionghan.Move]*MCTSNode
-	State    int32 
+	// EdgeVisits stores visits on parent->child edges.
+	// This avoids transposition pollution from using child node visits directly.
+	EdgeVisits map[xionghan.Move]int64
+	State      int32
 
 	PriorMap map[xionghan.Move]float32
-	NNValue  float64 
-	
-	Visits        int64   
-	WeightSum     float64 
-	UtilityAvg    float64 
-	UtilitySqAvg  float64 
-	VirtualLosses int32   
+	NNValue  float64
 
-	IsTerminal bool
-	Hash       uint64 
+	Visits        int64
+	WeightSum     float64
+	UtilityAvg    float64
+	UtilitySqAvg  float64
+	VirtualLosses int32
+
+	IsTerminal int32
+	Hash       uint64
 }
 
 func NewMCTSNode(mv xionghan.Move, pla xionghan.Side, hash uint64) *MCTSNode {
 	return &MCTSNode{
-		Move:     mv,
-		NextPla:  pla,
-		Hash:     hash,
-		Children: make(map[xionghan.Move]*MCTSNode),
-		State:    StateUnevaluated,
+		Move:       mv,
+		NextPla:    pla,
+		Hash:       hash,
+		Children:   make(map[xionghan.Move]*MCTSNode),
+		EdgeVisits: make(map[xionghan.Move]int64),
+		State:      StateUnevaluated,
 	}
 }
 
@@ -57,21 +62,31 @@ const (
 func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 	start := time.Now()
 	h := pos.EnsureHash()
+	repBase := newRepetitionState(cfg)
+	allowTransposition := !repBase.enabled
 
-	e.poolMu.Lock()
-	if e.mctsPool == nil {
-		e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
-	}
-	if len(e.mctsPool) > 300000 {
-		e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
-	}
-	root, ok := e.mctsPool[h]
-	if !ok {
+	var root *MCTSNode
+	if allowTransposition {
+		e.poolMu.Lock()
+		if e.mctsPool == nil {
+			e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
+		}
+		if len(e.mctsPool) > 300000 {
+			e.mctsPool = make(map[uint64]*MCTSNode, 1<<16)
+		}
+		var ok bool
+		root, ok = e.mctsPool[h]
+		if !ok {
+			root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h)
+			e.mctsPool[h] = root
+		}
+		e.mctsRoot = root
+		e.poolMu.Unlock()
+	} else {
+		// Repetition constraints are path-dependent, so disable transposition sharing.
 		root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h)
-		e.mctsPool[h] = root
+		e.mctsRoot = root
 	}
-	e.mctsRoot = root
-	e.poolMu.Unlock()
 
 	// 1. 根节点展开：这里保留专家过滤，保证“起手不弱智”
 	if atomic.LoadInt32(&root.State) == StateUnevaluated {
@@ -81,19 +96,19 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 			return SearchResult{}
 		}
 		// 特殊处理：根节点展开使用 full 模式
-		e.expandMCTSNodeInternal(root, pos, res, true)
+		e.expandMCTSNodeInternal(root, pos, res, true, allowTransposition)
 	}
-
-	repBase := newRepetitionState(cfg)
 
 	// 动态线程
 	numThreads := 16
 	if e.nn != nil && (e.nn.selectedProvider == "XNNPACK" || e.nn.selectedProvider == "CPU") {
 		numThreads = 4
 	}
-	
+
 	simsPerThread := cfg.MCTSSimulations / numThreads
-	if simsPerThread < 1 { simsPerThread = 1 }
+	if simsPerThread < 1 {
+		simsPerThread = 1
+	}
 
 	var wg sync.WaitGroup
 	for t := 0; t < numThreads; t++ {
@@ -105,7 +120,7 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 				if cfg.TimeLimit > 0 && time.Since(start) > cfg.TimeLimit {
 					break
 				}
-				e.mctsPlayout(root, pos, cfg, localRep)
+				e.mctsPlayout(root, pos, cfg, localRep, allowTransposition)
 			}
 		}()
 	}
@@ -116,8 +131,8 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 
 	bestMove := xionghan.Move{}
 	maxVisits := int64(-1)
-	for mv, child := range root.Children {
-		v := atomic.LoadInt64(&child.Visits)
+	for mv := range root.Children {
+		v := root.EdgeVisits[mv]
 		if v > maxVisits {
 			maxVisits = v
 			bestMove = mv
@@ -129,20 +144,31 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 		BestMove: bestMove,
 		Score:    int((redWinProb*2.0 - 1.0) * 10000),
 		WinProb:  float32(redWinProb),
-		Nodes:    atomic.LoadInt64(&root.Visits),
+		Nodes:    root.Visits,
 		TimeUsed: time.Since(start),
 		PV:       []xionghan.Move{bestMove},
 	}
 }
 
-func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchConfig, rep *repetitionState) {
+func applyMCTSContempt(utility float64, sideToMove xionghan.Side) float64 {
+	if utility > -0.05 && utility < 0.05 {
+		if sideToMove == xionghan.Red {
+			return utility - mctsContempt
+		}
+		return utility + mctsContempt
+	}
+	return utility
+}
+
+func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchConfig, rep *repetitionState, allowTransposition bool) {
 	node := root
 	currPos := pos
 	var path []*MCTSNode
+	var edgePath []xionghan.Move
 	path = append(path, node)
 
 	for {
-		if atomic.LoadInt32(&node.State) != StateExpanded || node.IsTerminal {
+		if atomic.LoadInt32(&node.State) != StateExpanded || atomic.LoadInt32(&node.IsTerminal) != 0 {
 			break
 		}
 
@@ -154,6 +180,7 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 		atomic.AddInt32(&nextNode.VirtualLosses, 1)
 		node = nextNode
 		path = append(path, node)
+		edgePath = append(edgePath, mv)
 
 		if rep.enabled {
 			rep.push(node.Hash)
@@ -167,23 +194,51 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 	}
 
 	var utility float64
-	if node.IsTerminal {
+	if atomic.LoadInt32(&node.IsTerminal) != 0 {
 		if currPos.SideToMove == xionghan.Red {
-			utility = -1.0 
+			utility = -1.0
 		} else {
 			utility = 1.0
 		}
 	} else {
-		res, err := e.nn.Evaluate(currPos)
-		if err != nil {
-			utility = node.UtilityAvg
-		} else {
-			// 2. 内部节点展开：禁用沉重的 Blunder/VCF 过滤，恢复速度
-			e.expandMCTSNodeInternal(node, currPos, res, false)
-			utility = float64(res.LossProb*2.0 - 1.0)
-			if utility > -0.05 && utility < 0.05 {
-				if currPos.SideToMove == xionghan.Red { utility -= mctsContempt } else { utility += mctsContempt }
+		for {
+			if atomic.LoadInt32(&node.IsTerminal) != 0 {
+				if currPos.SideToMove == xionghan.Red {
+					utility = -1.0
+				} else {
+					utility = 1.0
+				}
+				break
 			}
+
+			state := atomic.LoadInt32(&node.State)
+			if state == StateExpanded {
+				node.mu.RLock()
+				utility = node.NNValue
+				node.mu.RUnlock()
+				utility = applyMCTSContempt(utility, currPos.SideToMove)
+				break
+			}
+
+			if state == StateUnevaluated && atomic.CompareAndSwapInt32(&node.State, StateUnevaluated, StateEvaluating) {
+				res, err := e.nn.Evaluate(currPos)
+				if err != nil {
+					node.mu.RLock()
+					utility = node.UtilityAvg
+					node.mu.RUnlock()
+					// Allow retry by another playout instead of leaving node permanently evaluating.
+					atomic.StoreInt32(&node.State, StateUnevaluated)
+				} else {
+					// 2. 内部节点展开：禁用沉重的 Blunder/VCF 过滤，恢复速度
+					e.expandMCTSNodeFromEvaluating(node, currPos, res, false, allowTransposition)
+					utility = float64(res.LossProb*2.0 - 1.0)
+				}
+				utility = applyMCTSContempt(utility, currPos.SideToMove)
+				break
+			}
+
+			// Another thread is evaluating this node, wait and reuse that result.
+			runtime.Gosched()
 		}
 	}
 
@@ -196,8 +251,14 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 		n.UtilityAvg += (utility - n.UtilityAvg) / float64(n.Visits)
 		n.UtilitySqAvg += (utility*utility - n.UtilitySqAvg) / float64(n.Visits)
 		n.mu.Unlock()
-		
+
 		if i > 0 {
+			parent := path[i-1]
+			mv := edgePath[i-1]
+			parent.mu.Lock()
+			parent.EdgeVisits[mv]++
+			parent.mu.Unlock()
+
 			atomic.AddInt32(&n.VirtualLosses, -1)
 			if rep.enabled {
 				rep.pop(n.Hash)
@@ -214,34 +275,49 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 	var bestChild *MCTSNode
 	maxPUCT := -1e20
 
-	vis := atomic.LoadInt64(&node.Visits)
-	
-	stdev := math.Sqrt(math.Max(0, node.UtilitySqAvg - node.UtilityAvg*node.UtilityAvg))
-	stdevFactor := 1.0 + 0.5*(stdev/0.4 - 1.0)
-	if stdevFactor < 0.5 { stdevFactor = 0.5 }
-	if stdevFactor > 2.0 { stdevFactor = 2.0 }
+	vis := node.Visits
+
+	stdev := math.Sqrt(math.Max(0, node.UtilitySqAvg-node.UtilityAvg*node.UtilityAvg))
+	stdevFactor := 1.0 + 0.5*(stdev/0.4-1.0)
+	if stdevFactor < 0.5 {
+		stdevFactor = 0.5
+	}
+	if stdevFactor > 2.0 {
+		stdevFactor = 2.0
+	}
 
 	cpuct := (mctsCpuctExploration + mctsCpuctExplorationLog*math.Log((float64(vis)+mctsCpuctExplorationBase)/mctsCpuctExplorationBase)) * stdevFactor
 	totalVisitsSqrt := math.Sqrt(float64(vis) + 0.01)
-	
+
 	fpuReduction := mctsFpuReductionMax * math.Sqrt(math.Max(0, math.Min(1, float64(vis)/100.0)))
 	fpuBase := node.NNValue
-	if node.NextPla == xionghan.Black { fpuBase = -fpuBase }
+	if node.NextPla == xionghan.Black {
+		fpuBase = -fpuBase
+	}
 	fpuValue := fpuBase - fpuReduction
 
 	for mv, child := range node.Children {
-		if rep.enabled && !rep.canEnter(child.Hash) { continue }
+		if rep.enabled && !rep.canEnter(child.Hash) {
+			continue
+		}
 
-		v := float64(atomic.LoadInt64(&child.Visits))
+		edgeVisits := float64(node.EdgeVisits[mv])
 		vLoss := float64(atomic.LoadInt32(&child.VirtualLosses))
-		childWeight := v + vLoss
-		
+		childWeight := edgeVisits + vLoss
+
 		var q float64
-		if childWeight > 0 {
-			q = child.UtilityAvg
-			if node.NextPla == xionghan.Black { q = -q }
+		child.mu.RLock()
+		childVisits := float64(child.Visits)
+		childUtilityAvg := child.UtilityAvg
+		child.mu.RUnlock()
+
+		if edgeVisits > 0 && childVisits > 0 {
+			q = childUtilityAvg
+			if node.NextPla == xionghan.Black {
+				q = -q
+			}
 			if vLoss > 0 {
-				q = (q*v + (-1.0)*vLoss) / childWeight
+				q = (q*edgeVisits + (-1.0)*vLoss) / childWeight
 			}
 			if rep.enabled && rep.base[child.Hash] > 0 {
 				q -= 0.15 * float64(rep.base[child.Hash])
@@ -252,7 +328,7 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 
 		prior := float64(node.PriorMap[mv])
 		u := cpuct * prior * totalVisitsSqrt / (1.0 + childWeight)
-		
+
 		puct := q + u
 		if puct > maxPUCT {
 			maxPUCT = puct
@@ -265,14 +341,17 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 
 // expandMCTSNode 兼容接口
 func (e *Engine) expandMCTSNode(node *MCTSNode, pos *xionghan.Position, res *NNResult) {
-	e.expandMCTSNodeInternal(node, pos, res, false)
+	e.expandMCTSNodeInternal(node, pos, res, false, true)
 }
 
-func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, res *NNResult, useFullFilter bool) {
+func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, res *NNResult, useFullFilter bool, allowTransposition bool) {
 	if !atomic.CompareAndSwapInt32(&node.State, StateUnevaluated, StateEvaluating) {
 		return
 	}
+	e.expandMCTSNodeFromEvaluating(node, pos, res, useFullFilter, allowTransposition)
+}
 
+func (e *Engine) expandMCTSNodeFromEvaluating(node *MCTSNode, pos *xionghan.Position, res *NNResult, useFullFilter bool, allowTransposition bool) {
 	moves := pos.GenerateLegalMoves(true)
 	if useFullFilter {
 		// 只有根节点才跑这些重的过滤
@@ -286,7 +365,7 @@ func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, 
 	}
 
 	if len(moves) == 0 {
-		node.IsTerminal = true
+		atomic.StoreInt32(&node.IsTerminal, 1)
 		atomic.StoreInt32(&node.State, StateExpanded)
 		return
 	}
@@ -340,12 +419,14 @@ func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, 
 			} else {
 				p = pFrom * r.res.Policy[mv.To]
 			}
-			
+
 			// 虽然 ApplyMove 有点慢，但为了转置表（Transposition）这是必须的
 			// 我们已经移除了内部节点的 VCF/Blunder，速度应该能接受了
 			nextPos, ok := pos.ApplyMove(mv)
-			if !ok { continue }
-			
+			if !ok {
+				continue
+			}
+
 			childrenInfo = append(childrenInfo, childInfo{mv, nextPos.EnsureHash(), p})
 			priorMap[mv] = p
 			totalP += p
@@ -362,21 +443,32 @@ func (e *Engine) expandMCTSNodeInternal(node *MCTSNode, pos *xionghan.Position, 
 	node.mu.Lock()
 	node.NNValue = float64(res.LossProb*2.0 - 1.0)
 	node.PriorMap = priorMap
-	
+
 	nextPla := xionghan.Black
-	if node.NextPla == xionghan.Black { nextPla = xionghan.Red }
-	
+	if node.NextPla == xionghan.Black {
+		nextPla = xionghan.Red
+	}
+
 	for _, ci := range childrenInfo {
-		e.poolMu.Lock()
-		childNode, ok := e.mctsPool[ci.hash]
-		if !ok {
+		var childNode *MCTSNode
+		if allowTransposition {
+			e.poolMu.Lock()
+			var ok bool
+			childNode, ok = e.mctsPool[ci.hash]
+			if !ok {
+				childNode = NewMCTSNode(ci.mv, nextPla, ci.hash)
+				e.mctsPool[ci.hash] = childNode
+			}
+			e.poolMu.Unlock()
+		} else {
 			childNode = NewMCTSNode(ci.mv, nextPla, ci.hash)
-			e.mctsPool[ci.hash] = childNode
 		}
 		node.Children[ci.mv] = childNode
-		e.poolMu.Unlock()
+		if _, ok := node.EdgeVisits[ci.mv]; !ok {
+			node.EdgeVisits[ci.mv] = 0
+		}
 	}
 	node.mu.Unlock()
-	
+
 	atomic.StoreInt32(&node.State, StateExpanded)
 }
