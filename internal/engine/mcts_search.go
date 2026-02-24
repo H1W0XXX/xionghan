@@ -53,6 +53,10 @@ const (
 	mctsCpuctExplorationLog  = 0.45
 	mctsFpuReductionMax      = 0.2
 	mctsContempt             = 0.03
+	// KataGo-style root LCB guard: penalize high-variance root branches.
+	mctsRootLCBEnabled      = true
+	mctsRootLCBStdevs       = 4.0
+	mctsRootLCBMinVisitProp = 0.1
 
 	StateUnevaluated = iota
 	StateEvaluating
@@ -172,7 +176,7 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 			break
 		}
 
-		mv, nextNode := e.selectMCTSChild(node, rep)
+		mv, nextNode := e.selectMCTSChild(node, rep, node == root)
 		if nextNode == nil {
 			break
 		}
@@ -267,7 +271,7 @@ func (e *Engine) mctsPlayout(root *MCTSNode, pos *xionghan.Position, cfg SearchC
 	}
 }
 
-func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan.Move, *MCTSNode) {
+func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState, isRoot bool) (xionghan.Move, *MCTSNode) {
 	node.mu.RLock()
 	defer node.mu.RUnlock()
 
@@ -296,6 +300,20 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 	}
 	fpuValue := fpuBase - fpuReduction
 
+	// For root LCB gating, compute max edge visits among selectable children.
+	maxEdgeVisits := 0.0
+	if isRoot && mctsRootLCBEnabled {
+		for mv, child := range node.Children {
+			if rep.enabled && !rep.canEnter(child.Hash) {
+				continue
+			}
+			v := float64(node.EdgeVisits[mv])
+			if v > maxEdgeVisits {
+				maxEdgeVisits = v
+			}
+		}
+	}
+
 	for mv, child := range node.Children {
 		if rep.enabled && !rep.canEnter(child.Hash) {
 			continue
@@ -309,6 +327,7 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 		child.mu.RLock()
 		childVisits := float64(child.Visits)
 		childUtilityAvg := child.UtilityAvg
+		childUtilitySqAvg := child.UtilitySqAvg
 		child.mu.RUnlock()
 
 		if edgeVisits > 0 && childVisits > 0 {
@@ -316,6 +335,18 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState) (xionghan
 			if node.NextPla == xionghan.Black {
 				q = -q
 			}
+
+			if isRoot && mctsRootLCBEnabled && maxEdgeVisits > 0 &&
+				edgeVisits >= mctsRootLCBMinVisitProp*maxEdgeVisits {
+				variance := childUtilitySqAvg - childUtilityAvg*childUtilityAvg
+				if variance < 0 {
+					variance = 0
+				}
+				// Lower confidence bound on utility from current player perspective.
+				lcbRadius := mctsRootLCBStdevs * math.Sqrt(variance/math.Max(edgeVisits, 1.0))
+				q -= lcbRadius
+			}
+
 			if vLoss > 0 {
 				q = (q*edgeVisits + (-1.0)*vLoss) / childWeight
 			}
