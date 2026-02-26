@@ -107,6 +107,13 @@ func (e *Engine) FilterVCFMoves(pos *xionghan.Position, moves []xionghan.Move) [
 
 	var safeMoves []xionghan.Move
 	for _, mv := range moves {
+		// 0. 绝杀判定：如果这一步直接吃掉对方的王，那绝对合法且必须走
+		target := pos.Board.Squares[mv.To]
+		if target != 0 && target.Type() == xionghan.PieceKing {
+			safeMoves = append(safeMoves, mv)
+			continue
+		}
+
 		nextPos, ok := pos.ApplyMove(mv)
 		if !ok {
 			continue

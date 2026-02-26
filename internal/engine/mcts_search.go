@@ -67,6 +67,54 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 	start := time.Now()
 	h := pos.EnsureHash()
 	repBase := newRepetitionState(cfg)
+
+	// 0. 绝杀判定：直接吃王
+	moves := pos.GenerateLegalMoves(true)
+	moves = e.FilterLeiLockedMoves(pos, moves)
+	for _, mv := range moves {
+		targetPiece := pos.Board.Squares[mv.To]
+		if targetPiece != 0 && targetPiece.Type() == xionghan.PieceKing {
+			if repBase.enabled {
+				nextPos, ok := pos.ApplyMove(mv)
+				if !ok || !repBase.canEnter(nextPos.EnsureHash()) {
+					continue
+				}
+			}
+			return SearchResult{
+				BestMove: mv,
+				Score:    scoreInf,
+				WinProb:  1.0,
+				Depth:    1,
+				Nodes:    1,
+				TimeUsed: 0,
+				PV:       []xionghan.Move{mv},
+			}
+		}
+	}
+
+	// 1. VCF 连将赢判定（抢杀）
+	if pos.TotalPieces() <= 43 {
+		vcfRes := e.VCFSearch(pos, vcfDepthRoot)
+		if vcfRes.CanWin {
+			if repBase.enabled {
+				nextPos, ok := pos.ApplyMove(vcfRes.Move)
+				if !ok || !repBase.canEnter(nextPos.EnsureHash()) {
+					goto skipMCTSVCF
+				}
+			}
+			return SearchResult{
+				BestMove: vcfRes.Move,
+				Score:    900000,
+				WinProb:  1.0,
+				Depth:    vcfDepthRoot,
+				Nodes:    100,
+				TimeUsed: 0,
+				PV:       []xionghan.Move{vcfRes.Move},
+			}
+		}
+	}
+skipMCTSVCF:
+
 	allowTransposition := !repBase.enabled
 
 	var root *MCTSNode
