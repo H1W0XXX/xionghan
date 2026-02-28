@@ -1145,6 +1145,181 @@ static bool sameRepetitionState(const Board& a, const Board& b) {
   return true;
 }
 
+static bool isHighValuePieceType(Color pieceType) {
+  return (
+    pieceType == PT_ROOK ||
+    pieceType == PT_KNIGHT ||
+    pieceType == PT_CANNON ||
+    pieceType == PT_LEI
+  );
+}
+
+static bool isLowValuePieceType(Color pieceType) {
+  return (
+    pieceType == PT_PAWN ||
+    pieceType == PT_ELEPHANT ||
+    pieceType == PT_WEI ||
+    pieceType == PT_FENG ||
+    pieceType == PT_ADVISOR
+  );
+}
+
+static void getMaterialGroupDiffWhite(
+  const Board& board,
+  int& highDiffWhite,
+  int& lowDiffWhite
+) {
+  int highWhite = 0;
+  int highBlack = 0;
+  int lowWhite = 0;
+  int lowBlack = 0;
+  for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+    Color c = board.colors[i];
+    if(c == C_EMPTY || c == C_WALL)
+      continue;
+    Player p = getPiecePla(c);
+    Color pt = getPieceType(c);
+    if(isHighValuePieceType(pt)) {
+      if(p == P_WHITE) highWhite += 1;
+      else highBlack += 1;
+    }
+    else if(isLowValuePieceType(pt)) {
+      if(p == P_WHITE) lowWhite += 1;
+      else lowBlack += 1;
+    }
+  }
+  highDiffWhite = highWhite - highBlack;
+  lowDiffWhite = lowWhite - lowBlack;
+}
+
+static bool canCaptureSquareInOneTurn(
+  const Board& board,
+  const BoardHistory& hist,
+  Player side,
+  Loc targetLoc
+) {
+  if(board.stage != 0 || board.nextPla != side || !board.isOnBoard(targetLoc))
+    return false;
+  if(board.colors[targetLoc] == C_EMPTY || board.colors[targetLoc] == C_WALL)
+    return false;
+
+  int8_t chooseMask[Board::MAX_ARR_SIZE];
+  GameLogic::getLegalBitmask(board, side, chooseMask);
+  for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+    if(chooseMask[i] == 0)
+      continue;
+    Loc from = (Loc)i;
+    Board boardAfterChoose = board;
+    BoardHistory histAfterChoose = hist;
+    if(!histAfterChoose.isLegal(boardAfterChoose, from, side))
+      continue;
+    histAfterChoose.makeBoardMoveAssumeLegal(boardAfterChoose, from, side);
+    if(boardAfterChoose.stage != 1 || boardAfterChoose.nextPla != side)
+      continue;
+
+    int8_t placeMask[Board::MAX_ARR_SIZE];
+    GameLogic::getLegalBitmask(boardAfterChoose, side, placeMask);
+    if(placeMask[targetLoc] != 0)
+      return true;
+  }
+  return false;
+}
+
+static bool canPieceCaptureTargetInOneTurn(
+  const Board& board,
+  const BoardHistory& hist,
+  Player side,
+  Loc fromLoc,
+  Loc targetLoc,
+  Board* outBoardAfterCapture,
+  BoardHistory* outHistAfterCapture
+) {
+  if(board.stage != 0 || !board.isOnBoard(fromLoc) || !board.isOnBoard(targetLoc))
+    return false;
+  Color fromColor = board.colors[fromLoc];
+  Color targetColor = board.colors[targetLoc];
+  if(fromColor == C_EMPTY || fromColor == C_WALL || getPiecePla(fromColor) != side)
+    return false;
+  if(targetColor == C_EMPTY || targetColor == C_WALL || getPiecePla(targetColor) == side)
+    return false;
+
+  int8_t chooseMask[Board::MAX_ARR_SIZE];
+  GameLogic::getLegalBitmask(board, side, chooseMask);
+  if(chooseMask[fromLoc] == 0)
+    return false;
+
+  Board boardAfterChoose = board;
+  BoardHistory histAfterChoose = hist;
+  if(!histAfterChoose.isLegal(boardAfterChoose, fromLoc, side))
+    return false;
+  histAfterChoose.makeBoardMoveAssumeLegal(boardAfterChoose, fromLoc, side);
+  if(boardAfterChoose.stage != 1 || boardAfterChoose.midLocs[0] != fromLoc)
+    return false;
+
+  int8_t placeMask[Board::MAX_ARR_SIZE];
+  GameLogic::getLegalBitmask(boardAfterChoose, side, placeMask);
+  if(placeMask[targetLoc] == 0)
+    return false;
+
+  if(!histAfterChoose.isLegal(boardAfterChoose, targetLoc, side))
+    return false;
+  Board boardAfterCapture = boardAfterChoose;
+  BoardHistory histAfterCapture = histAfterChoose;
+  histAfterCapture.makeBoardMoveAssumeLegal(boardAfterCapture, targetLoc, side);
+
+  if(outBoardAfterCapture != nullptr)
+    *outBoardAfterCapture = boardAfterCapture;
+  if(outHistAfterCapture != nullptr)
+    *outHistAfterCapture = histAfterCapture;
+  return true;
+}
+
+static int countSafeHighValueCapturesFromMovedPiece(
+  const Board& board,
+  const BoardHistory& hist,
+  Player attacker,
+  Loc movedPieceLoc
+) {
+  if(board.stage != 0 || !board.isOnBoard(movedPieceLoc))
+    return 0;
+  Color moverPiece = board.colors[movedPieceLoc];
+  if(moverPiece == C_EMPTY || moverPiece == C_WALL || getPiecePla(moverPiece) != attacker)
+    return 0;
+
+  int safeCount = 0;
+  for(int i = 0; i<Board::MAX_ARR_SIZE; i++) {
+    Loc targetLoc = (Loc)i;
+    Color targetColor = board.colors[targetLoc];
+    if(targetColor == C_EMPTY || targetColor == C_WALL || getPiecePla(targetColor) != getOpp(attacker))
+      continue;
+    if(!isHighValuePieceType(getPieceType(targetColor)))
+      continue;
+
+    Board boardAfterCapture;
+    BoardHistory histAfterCapture;
+    bool canCapture = canPieceCaptureTargetInOneTurn(
+      board, hist, attacker, movedPieceLoc, targetLoc,
+      &boardAfterCapture, &histAfterCapture
+    );
+    if(!canCapture)
+      continue;
+
+    bool canRecapture = canCaptureSquareInOneTurn(boardAfterCapture, histAfterCapture, getOpp(attacker), targetLoc);
+    if(!canRecapture)
+      safeCount += 1;
+  }
+  return safeCount;
+}
+
+struct PendingCheckRewardState {
+  bool active = false;
+  Player attacker = C_EMPTY;
+  Player defender = C_EMPTY;
+  bool defenderResponded = false;
+  int checkTurnIdx = -1;
+  int defendTurnIdx = -1;
+};
+
 
 //Run a game between two bots. It is OK if both bots are the same bot.
 FinishedGameData* Play::runGame(
@@ -1297,6 +1472,7 @@ FinishedGameData* Play::runGame(
   vector<double> historicalMctsDrawValues;
   vector<ReportedSearchValues> rawNNValues;
   vector<CompletedTurnState> completedTurnStates;
+  PendingCheckRewardState pendingCheckRewardState;
 
   ClockTimer timer;
 
@@ -1373,6 +1549,7 @@ FinishedGameData* Play::runGame(
       gameData->nnRawStatsByTurn.push_back(computeNNRawStats(toMoveBot, board, hist, pla));
 
       gameData->targetWeightByTurn.push_back(limits.targetWeight);
+      gameData->localBonusByTurn.push_back(0.0f);
 
       double policySurprise = 0.0, policyEntropy = 0.0, searchEntropy = 0.0;
       bool success = toMoveBot->getPolicySurpriseAndEntropy(policySurprise, searchEntropy, policyEntropy);
@@ -1426,6 +1603,28 @@ FinishedGameData* Play::runGame(
 
     if(onEachMove != nullptr)
       onEachMove(board, hist, pla, loc, historicalMctsWinLossValues, historicalMctsWinLossValues, toMoveBot);
+
+    const bool completesTurn = (board.stage == STAGE_NUM_EACH_PLA - 1);
+    const bool localRewardEnabledThisMove =
+      recordFullData &&
+      playSettings.localRewardEnabled &&
+      completesTurn &&
+      !gameData->localBonusByTurn.empty();
+    int highDiffWhiteBefore = 0;
+    int lowDiffWhiteBefore = 0;
+    if(localRewardEnabledThisMove) {
+      getMaterialGroupDiffWhite(board, highDiffWhiteBefore, lowDiffWhiteBefore);
+    }
+
+    Loc captureLoc = Board::NULL_LOC;
+    Color capturedPieceType = PT_NONE;
+    if(completesTurn && board.isOnBoard(loc)) {
+      Color dest = board.colors[loc];
+      if(dest != C_EMPTY && dest != C_WALL && getPiecePla(dest) == getOpp(pla)) {
+        captureLoc = loc;
+        capturedPieceType = getPieceType(dest);
+      }
+    }
 
     //Finally, make the move on the bots
     bool suc;
@@ -1487,6 +1686,95 @@ FinishedGameData* Play::runGame(
       completedTurnStates.push_back(currentState);
     }
 
+    if(localRewardEnabledThisMove && board.stage == 0) {
+      const int currentTurnIdx = (int)gameData->localBonusByTurn.size() - 1;
+      auto addLocalBonusAtTurn = [&](int turnIdx, float delta) {
+        if(turnIdx < 0 || turnIdx >= (int)gameData->localBonusByTurn.size())
+          return;
+        float value = gameData->localBonusByTurn[turnIdx] + delta;
+        float maxAbs = playSettings.localRewardMaxAbs;
+        if(maxAbs >= 0.0f) {
+          if(value > maxAbs) value = maxAbs;
+          if(value < -maxAbs) value = -maxAbs;
+        }
+        gameData->localBonusByTurn[turnIdx] = value;
+      };
+
+      float localBonus = 0.0f;
+      int highDiffWhiteAfter = 0;
+      int lowDiffWhiteAfter = 0;
+      getMaterialGroupDiffWhite(board, highDiffWhiteAfter, lowDiffWhiteAfter);
+
+      int deltaHighWhite = highDiffWhiteAfter - highDiffWhiteBefore;
+      int deltaLowWhite = lowDiffWhiteAfter - lowDiffWhiteBefore;
+      float deltaHighMover = (pla == P_WHITE) ? (float)deltaHighWhite : (float)(-deltaHighWhite);
+      float deltaLowMover = (pla == P_WHITE) ? (float)deltaLowWhite : (float)(-deltaLowWhite);
+      localBonus += playSettings.localRewardHighDeltaWeight * deltaHighMover;
+      localBonus += playSettings.localRewardLowDeltaWeight * deltaLowMover;
+
+      if(
+        board.isOnBoard(loc) &&
+        playSettings.localRewardMultiSafeCaptureBonus != 0.0f &&
+        playSettings.localRewardMultiSafeCaptureMinTargets >= 2
+      ) {
+        int safeHighCaptureCount = countSafeHighValueCapturesFromMovedPiece(board, hist, pla, loc);
+        if(safeHighCaptureCount >= playSettings.localRewardMultiSafeCaptureMinTargets) {
+          int bonusLevels = safeHighCaptureCount - playSettings.localRewardMultiSafeCaptureMinTargets + 1;
+          localBonus += playSettings.localRewardMultiSafeCaptureBonus * (float)bonusLevels;
+        }
+      }
+
+      const bool gaveCheckAfterMove = (!hist.isGameFinished) && GameLogic::isInCheck(board, board.nextPla);
+      if(pendingCheckRewardState.active) {
+        if(!pendingCheckRewardState.defenderResponded) {
+          if(pla == pendingCheckRewardState.defender) {
+            bool defenderEscaped = !GameLogic::isInCheck(board, pla);
+            if(!playSettings.localRewardRequireDefenderEscapesCheck || defenderEscaped) {
+              pendingCheckRewardState.defenderResponded = true;
+              pendingCheckRewardState.defendTurnIdx = currentTurnIdx;
+            }
+            else {
+              pendingCheckRewardState = PendingCheckRewardState();
+            }
+          }
+          else {
+            pendingCheckRewardState = PendingCheckRewardState();
+          }
+        }
+        else {
+          if(pla == pendingCheckRewardState.attacker) {
+            if(captureLoc != Board::NULL_LOC && isHighValuePieceType(capturedPieceType)) {
+              bool canRecapture = canCaptureSquareInOneTurn(board, hist, getOpp(pla), captureLoc);
+              if(!canRecapture) {
+                float chainBonus = playSettings.localRewardCheckCaptureBonus;
+                localBonus += chainBonus;
+                addLocalBonusAtTurn(pendingCheckRewardState.checkTurnIdx, 0.5f * chainBonus);
+                addLocalBonusAtTurn(pendingCheckRewardState.defendTurnIdx, -0.5f * chainBonus);
+              }
+              else if(playSettings.localRewardUnsafeCapturePenalty > 0.0f) {
+                localBonus -= playSettings.localRewardUnsafeCapturePenalty;
+              }
+            }
+            pendingCheckRewardState = PendingCheckRewardState();
+          }
+          else {
+            pendingCheckRewardState = PendingCheckRewardState();
+          }
+        }
+      }
+
+      if(gaveCheckAfterMove) {
+        pendingCheckRewardState.active = true;
+        pendingCheckRewardState.attacker = pla;
+        pendingCheckRewardState.defender = getOpp(pla);
+        pendingCheckRewardState.defenderResponded = false;
+        pendingCheckRewardState.checkTurnIdx = currentTurnIdx;
+        pendingCheckRewardState.defendTurnIdx = -1;
+      }
+
+      addLocalBonusAtTurn(currentTurnIdx, localBonus);
+    }
+
     //Check for resignation
     if(!hist.isGameFinished && playSettings.allowResignation && historicalMctsWinLossValues.size() >= playSettings.resignConsecTurns) {
       //Play at least some moves no matter what
@@ -1527,6 +1815,25 @@ FinishedGameData* Play::runGame(
     gameData->hitTurnLimit = false;
   else
     gameData->hitTurnLimit = true;
+
+  if(recordFullData && playSettings.localRewardEnabled) {
+    bool hasDecisiveWinner = hist.isGameFinished && (hist.winner == P_BLACK || hist.winner == P_WHITE);
+    int startTurnIdx = (int)gameData->startHist.moveHistory.size();
+    for(int i = 0; i<(int)gameData->localBonusByTurn.size(); i++) {
+      if(!hasDecisiveWinner) {
+        gameData->localBonusByTurn[i] = 0.0f;
+        continue;
+      }
+      int moveIdx = startTurnIdx + i;
+      if(moveIdx < 0 || moveIdx >= (int)gameData->endHist.moveHistory.size()) {
+        gameData->localBonusByTurn[i] = 0.0f;
+        continue;
+      }
+      Player mover = gameData->endHist.moveHistory[moveIdx].pla;
+      if(mover != hist.winner)
+        gameData->localBonusByTurn[i] = 0.0f;
+    }
+  }
 
 
   if(recordFullData) {

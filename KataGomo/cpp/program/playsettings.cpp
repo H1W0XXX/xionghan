@@ -9,6 +9,15 @@ PlaySettings::PlaySettings()
    cheapSearchProb(0),cheapSearchVisits(0),cheapSearchTargetWeight(0.0f),
    reduceVisits(false),reduceVisitsThreshold(100.0),reduceVisitsThresholdLookback(1),reducedVisitsMin(0),reducedVisitsWeight(1.0f),
    policySurpriseDataWeight(0.0),valueSurpriseDataWeight(0.0),scaleDataWeight(1.0),
+   localRewardEnabled(false),
+   localRewardHighDeltaWeight(0.05f),
+   localRewardLowDeltaWeight(0.01f),
+   localRewardCheckCaptureBonus(0.12f),
+   localRewardUnsafeCapturePenalty(0.06f),
+   localRewardMultiSafeCaptureBonus(0.10f),
+   localRewardMultiSafeCaptureMinTargets(2),
+   localRewardRequireDefenderEscapesCheck(true),
+   localRewardMaxAbs(0.30f),
    recordTreePositions(false),recordTreeThreshold(0),recordTreeTargetWeight(0.0f),
    noResolveTargetWeights(false),
    allowResignation(false),resignThreshold(0.0),resignConsecTurns(1),
@@ -70,6 +79,24 @@ PlaySettings PlaySettings::loadForSelfplay(ConfigParser& cfg) {
   playSettings.policySurpriseDataWeight = cfg.getDouble("policySurpriseDataWeight",0.0,1.0);
   playSettings.valueSurpriseDataWeight = cfg.getDouble("valueSurpriseDataWeight",0.0,1.0);
   playSettings.scaleDataWeight = cfg.contains("scaleDataWeight") ? cfg.getDouble("scaleDataWeight",0.01,10.0) : 1.0;
+  playSettings.localRewardEnabled =
+    cfg.contains("localRewardEnabled") ? cfg.getBool("localRewardEnabled") : false;
+  playSettings.localRewardHighDeltaWeight =
+    cfg.contains("localRewardHighDeltaWeight") ? cfg.getFloat("localRewardHighDeltaWeight",-10.0f,10.0f) : 0.05f;
+  playSettings.localRewardLowDeltaWeight =
+    cfg.contains("localRewardLowDeltaWeight") ? cfg.getFloat("localRewardLowDeltaWeight",-10.0f,10.0f) : 0.01f;
+  playSettings.localRewardCheckCaptureBonus =
+    cfg.contains("localRewardCheckCaptureBonus") ? cfg.getFloat("localRewardCheckCaptureBonus",-10.0f,10.0f) : 0.12f;
+  playSettings.localRewardUnsafeCapturePenalty =
+    cfg.contains("localRewardUnsafeCapturePenalty") ? cfg.getFloat("localRewardUnsafeCapturePenalty",0.0f,10.0f) : 0.06f;
+  playSettings.localRewardMultiSafeCaptureBonus =
+    cfg.contains("localRewardMultiSafeCaptureBonus") ? cfg.getFloat("localRewardMultiSafeCaptureBonus",-10.0f,10.0f) : 0.10f;
+  playSettings.localRewardMultiSafeCaptureMinTargets =
+    cfg.contains("localRewardMultiSafeCaptureMinTargets") ? cfg.getInt("localRewardMultiSafeCaptureMinTargets",2,20) : 2;
+  playSettings.localRewardRequireDefenderEscapesCheck =
+    cfg.contains("localRewardRequireDefenderEscapesCheck") ? cfg.getBool("localRewardRequireDefenderEscapesCheck") : true;
+  playSettings.localRewardMaxAbs =
+    cfg.contains("localRewardMaxAbs") ? cfg.getFloat("localRewardMaxAbs",0.0f,100.0f) : 0.30f;
   playSettings.normalAsymmetricPlayoutProb = cfg.getDouble("normalAsymmetricPlayoutProb",0.0,1.0);
   playSettings.maxAsymmetricRatio = cfg.getDouble("maxAsymmetricRatio",1.0,100.0);
   playSettings.forSelfPlay = true;

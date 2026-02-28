@@ -158,7 +158,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		if targetPiece != 0 && targetPiece.Type() == xionghan.PieceKing {
 			if rep.enabled {
 				nextPos, ok := pos.ApplyMove(mv)
-				if !ok || !rep.canEnter(nextPos.EnsureHash()) {
+				if !ok || !rep.canEnter(nextPos.EnsureHash(), moveGivesCheck(nextPos)) {
 					continue
 				}
 			}
@@ -180,7 +180,7 @@ func (e *Engine) Search(pos *xionghan.Position, cfg SearchConfig) SearchResult {
 		if vcfRes.CanWin {
 			if rep.enabled {
 				nextPos, ok := pos.ApplyMove(vcfRes.Move)
-				if !ok || !rep.canEnter(nextPos.EnsureHash()) {
+				if !ok || !rep.canEnter(nextPos.EnsureHash(), moveGivesCheck(nextPos)) {
 					goto skipVCFShortcut
 				}
 			}
@@ -381,7 +381,7 @@ func (e *Engine) alphaBetaRoot(pos *xionghan.Position, depth int, alpha, beta in
 			continue
 		}
 		childHash := child.EnsureHash()
-		if rep != nil && rep.enabled && !rep.canEnter(childHash) {
+		if rep != nil && rep.enabled && !rep.canEnter(childHash, moveGivesCheck(child)) {
 			continue
 		}
 		children = append(children, childNode{
@@ -579,7 +579,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			var childHash uint64
 			if rep != nil && rep.enabled {
 				childHash = child.EnsureHash()
-				if !rep.canEnter(childHash) {
+				if !rep.canEnter(childHash, moveGivesCheck(child)) {
 					continue
 				}
 				rep.push(childHash)
@@ -616,7 +616,7 @@ func (e *Engine) alphaBeta(pos *xionghan.Position, depth int, alpha, beta int, d
 			var childHash uint64
 			if rep != nil && rep.enabled {
 				childHash = child.EnsureHash()
-				if !rep.canEnter(childHash) {
+				if !rep.canEnter(childHash, moveGivesCheck(child)) {
 					continue
 				}
 				rep.push(childHash)
@@ -718,12 +718,23 @@ func (r *repetitionState) clone() *repetitionState {
 	return cp
 }
 
-func (r *repetitionState) canEnter(hash uint64) bool {
+func (r *repetitionState) canEnter(hash uint64, givesCheck bool) bool {
 	if r == nil || !r.enabled {
+		return true
+	}
+	// 禁止“长将”而非“长捉/一般重复”：仅在形成将军时生效。
+	if !givesCheck {
 		return true
 	}
 	seen := r.base[hash] + r.path[hash] + 1
 	return seen < r.banCount
+}
+
+func moveGivesCheck(nextPos *xionghan.Position) bool {
+	if nextPos == nil {
+		return false
+	}
+	return nextPos.IsInCheck(nextPos.SideToMove)
 }
 
 func (r *repetitionState) push(hash uint64) {

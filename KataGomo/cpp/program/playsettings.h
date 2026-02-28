@@ -34,6 +34,24 @@ struct PlaySettings {
   double valueSurpriseDataWeight;
   //Scale frequency weights for writing data by this
   double scaleDataWeight;
+  //Enable local tactical reward shaping in selfplay data.
+  bool localRewardEnabled;
+  //Per-move local reward from material delta of high-value pieces (che/ma/pao/lei).
+  float localRewardHighDeltaWeight;
+  //Per-move local reward from material delta of lower-value pieces.
+  float localRewardLowDeltaWeight;
+  //Bonus when a check -> defended reply -> safe capture(high-value) chain occurs.
+  float localRewardCheckCaptureBonus;
+  //Penalty when the follow-up capture can be immediately recaptured.
+  float localRewardUnsafeCapturePenalty;
+  //Bonus when one move creates >= N safe high-value capture options (fork-like threat).
+  float localRewardMultiSafeCaptureBonus;
+  //Minimum number of safe high-value captures needed to trigger fork bonus.
+  int localRewardMultiSafeCaptureMinTargets;
+  //If true, require defender to actually get out of check for the chain bonus.
+  bool localRewardRequireDefenderEscapesCheck;
+  //Clamp absolute local reward written per move.
+  float localRewardMaxAbs;
 
   //Record positions from within the search tree that had at least this many visits, recording only with this weight.
   bool recordTreePositions;

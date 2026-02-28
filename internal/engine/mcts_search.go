@@ -34,13 +34,15 @@ type MCTSNode struct {
 
 	IsTerminal int32
 	Hash       uint64
+	GivesCheck bool
 }
 
-func NewMCTSNode(mv xionghan.Move, pla xionghan.Side, hash uint64) *MCTSNode {
+func NewMCTSNode(mv xionghan.Move, pla xionghan.Side, hash uint64, givesCheck bool) *MCTSNode {
 	return &MCTSNode{
 		Move:       mv,
 		NextPla:    pla,
 		Hash:       hash,
+		GivesCheck: givesCheck,
 		Children:   make(map[xionghan.Move]*MCTSNode),
 		EdgeVisits: make(map[xionghan.Move]int64),
 		State:      StateUnevaluated,
@@ -76,7 +78,7 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 		if targetPiece != 0 && targetPiece.Type() == xionghan.PieceKing {
 			if repBase.enabled {
 				nextPos, ok := pos.ApplyMove(mv)
-				if !ok || !repBase.canEnter(nextPos.EnsureHash()) {
+				if !ok || !repBase.canEnter(nextPos.EnsureHash(), moveGivesCheck(nextPos)) {
 					continue
 				}
 			}
@@ -98,7 +100,7 @@ func (e *Engine) runMCTS(pos *xionghan.Position, cfg SearchConfig) SearchResult 
 		if vcfRes.CanWin {
 			if repBase.enabled {
 				nextPos, ok := pos.ApplyMove(vcfRes.Move)
-				if !ok || !repBase.canEnter(nextPos.EnsureHash()) {
+				if !ok || !repBase.canEnter(nextPos.EnsureHash(), moveGivesCheck(nextPos)) {
 					goto skipMCTSVCF
 				}
 			}
@@ -129,14 +131,14 @@ skipMCTSVCF:
 		var ok bool
 		root, ok = e.mctsPool[h]
 		if !ok {
-			root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h)
+			root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h, false)
 			e.mctsPool[h] = root
 		}
 		e.mctsRoot = root
 		e.poolMu.Unlock()
 	} else {
 		// Repetition constraints are path-dependent, so disable transposition sharing.
-		root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h)
+		root = NewMCTSNode(xionghan.Move{}, pos.SideToMove, h, false)
 		e.mctsRoot = root
 	}
 
@@ -352,7 +354,7 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState, isRoot bo
 	maxEdgeVisits := 0.0
 	if isRoot && mctsRootLCBEnabled {
 		for mv, child := range node.Children {
-			if rep.enabled && !rep.canEnter(child.Hash) {
+			if rep.enabled && !rep.canEnter(child.Hash, child.GivesCheck) {
 				continue
 			}
 			v := float64(node.EdgeVisits[mv])
@@ -363,7 +365,7 @@ func (e *Engine) selectMCTSChild(node *MCTSNode, rep *repetitionState, isRoot bo
 	}
 
 	for mv, child := range node.Children {
-		if rep.enabled && !rep.canEnter(child.Hash) {
+		if rep.enabled && !rep.canEnter(child.Hash, child.GivesCheck) {
 			continue
 		}
 
@@ -482,9 +484,10 @@ func (e *Engine) expandMCTSNodeFromEvaluating(node *MCTSNode, pos *xionghan.Posi
 	priorMap := make(map[xionghan.Move]float32)
 	totalP := float32(0)
 	type childInfo struct {
-		mv   xionghan.Move
-		hash uint64
-		p    float32
+		mv         xionghan.Move
+		hash       uint64
+		givesCheck bool
+		p          float32
 	}
 	var childrenInfo []childInfo
 
@@ -506,7 +509,12 @@ func (e *Engine) expandMCTSNodeFromEvaluating(node *MCTSNode, pos *xionghan.Posi
 				continue
 			}
 
-			childrenInfo = append(childrenInfo, childInfo{mv, nextPos.EnsureHash(), p})
+			childrenInfo = append(childrenInfo, childInfo{
+				mv:         mv,
+				hash:       nextPos.EnsureHash(),
+				givesCheck: moveGivesCheck(nextPos),
+				p:          p,
+			})
 			priorMap[mv] = p
 			totalP += p
 		}
@@ -535,12 +543,12 @@ func (e *Engine) expandMCTSNodeFromEvaluating(node *MCTSNode, pos *xionghan.Posi
 			var ok bool
 			childNode, ok = e.mctsPool[ci.hash]
 			if !ok {
-				childNode = NewMCTSNode(ci.mv, nextPla, ci.hash)
+				childNode = NewMCTSNode(ci.mv, nextPla, ci.hash, ci.givesCheck)
 				e.mctsPool[ci.hash] = childNode
 			}
 			e.poolMu.Unlock()
 		} else {
-			childNode = NewMCTSNode(ci.mv, nextPla, ci.hash)
+			childNode = NewMCTSNode(ci.mv, nextPla, ci.hash, ci.givesCheck)
 		}
 		node.Children[ci.mv] = childNode
 		if _, ok := node.EdgeVisits[ci.mv]; !ok {

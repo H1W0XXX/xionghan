@@ -712,7 +712,24 @@ bool GameLogic::isAttacked(const Board& board, Loc sq, Player bySide) {
   for(int r=0; r<13; r++) {
     for(int c=0; c<13; c++) {
       Loc from = indexOf(r, c, board.x_size);
-      if(board.colors[from] != C_EMPTY && board.colors[from] != C_WALL && getPiecePla(board.colors[from]) == bySide) {
+      Color color = board.colors[from];
+      if(color != C_EMPTY && color != C_WALL && getPiecePla(color) == bySide) {
+        int type = getPieceType(color);
+        // 象、士、卫 无法将军，直接跳过
+        if(type == PT_ELEPHANT || type == PT_ADVISOR || type == PT_WEI) {
+          continue;
+        }
+
+        // 优化：兵、马、檑 只有在对方半场才可能将军
+        if(type == PT_PAWN || type == PT_KNIGHT || type == PT_LEI) {
+          // 在 C++ 引擎中，P_BLACK 是红方（底部，r > 6），P_WHITE 是绿方（顶部，r < 6）
+          // 红方的对方半场是 r < 6，绿方的对方半场是 r > 6
+          bool isOpponentHalf = (bySide == P_BLACK) ? (r < 6) : (r > 6);
+          if(!isOpponentHalf) {
+            continue;
+          }
+        }
+
         std::vector<Loc> tos;
         genMoves(board, from, tos);
         for(Loc to : tos) {

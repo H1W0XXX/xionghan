@@ -58,8 +58,9 @@ type Board struct {
 }
 
 type Move struct {
-	From int `json:"from"`
-	To   int `json:"to"`
+	From  int `json:"from"`
+	To    int `json:"to"`
+	Score int `json:"-"` // 用于搜索排序，不进行 JSON 序列化
 }
 
 // Position = 棋盘 + 轮到谁走（先不管王车易位之类）

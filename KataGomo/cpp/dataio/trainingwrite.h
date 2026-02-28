@@ -77,6 +77,7 @@ struct FinishedGameData {
   std::vector<double> policySurpriseByTurn;
   std::vector<double> policyEntropyByTurn;
   std::vector<double> searchEntropyByTurn;
+  std::vector<float> localBonusByTurn;
   std::vector<ValueTargets> whiteValueTargetsByTurn; //Except this one, we may have some of
   std::vector<NNRawStats> nnRawStatsByTurn;
 
@@ -185,7 +186,7 @@ struct TrainingWriteBuffers {
   //C58: Raw scoremean from neural net
   //C59: Policy prior entropy
   //C60: Number of visits in the search generating this row, prior to any reduction.
-  //C61: Number of bonus points the player to move will get onward from this point in the game
+  //C61: Local tactical bonus for the player to move (selfplay reward shaping)
   //C62: Unused
   //C63: Data format version, currently always equals 1.
 

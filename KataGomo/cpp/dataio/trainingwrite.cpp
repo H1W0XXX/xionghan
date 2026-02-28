@@ -95,6 +95,10 @@ FinishedGameData::FinishedGameData()
    targetWeightByTurn(),
    targetWeightByTurnUnrounded(),
    policyTargetsByTurn(),
+   policySurpriseByTurn(),
+   policyEntropyByTurn(),
+   searchEntropyByTurn(),
+   localBonusByTurn(),
    whiteValueTargetsByTurn(),
    nnRawStatsByTurn(),
 
@@ -152,6 +156,8 @@ void FinishedGameData::printDebug(ostream& out) const {
     out << "policyEntropyByTurn " << i << " " << policyEntropyByTurn[i] << endl;
   for (int i = 0; i < searchEntropyByTurn.size(); i++)
     out << "searchEntropyByTurn " << i << " " << searchEntropyByTurn[i] << endl;
+  for(int i = 0; i<localBonusByTurn.size(); i++)
+    out << "localBonusByTurn " << i << " " << localBonusByTurn[i] << endl;
 
   for(int i = 0; i<whiteValueTargetsByTurn.size(); i++) {
     out << "whiteValueTargetsByTurn " << i << " ";
@@ -464,7 +470,10 @@ void TrainingWriteBuffers::addRow(
   rowGlobal[60] = (float)unreducedNumVisits;
 
   //Bonus points
-  rowGlobal[61] = 0.0f; 
+  if(!isSidePosition && whiteValueTargetsIdx >= 0 && whiteValueTargetsIdx < data.localBonusByTurn.size())
+    rowGlobal[61] = data.localBonusByTurn[whiteValueTargetsIdx];
+  else
+    rowGlobal[61] = 0.0f;
 
   //Unused
   rowGlobal[62] = 0.0f;
@@ -737,6 +746,7 @@ void TrainingDataWriter::writeGame(const FinishedGameData& data) {
   assert(data.policySurpriseByTurn.size() == numMoves);
   assert(data.policyEntropyByTurn.size() == numMoves);
   assert(data.searchEntropyByTurn.size() == numMoves);
+  assert(data.localBonusByTurn.size() == numMoves);
   assert(data.whiteValueTargetsByTurn.size() == numMoves+1);
   assert(data.nnRawStatsByTurn.size() == numMoves);
 

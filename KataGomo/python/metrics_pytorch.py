@@ -76,6 +76,22 @@ class Metrics:
         loss = cross_entropy(pred_logits, target_probs, dim=2) - cross_entropy(torch.log(target_probs + 1.0e-30), target_probs, dim=2)
         return 1.20 * global_weight.unsqueeze(1) * loss
 
+    def apply_local_bonus_to_td_value_targets(self, target_probs, local_bonus):
+        assert target_probs.shape == (self.n, self.num_td_values, self.value_len)
+        assert local_bonus.shape == (self.n,)
+        # Local tactical bonus shifts WL balance of TD targets while preserving no-result mass.
+        bonus = torch.clamp(local_bonus, min=-1.0, max=1.0)
+        bonus_scales = constant_like([0.12, 0.08, 0.04], target_probs).view(1, self.num_td_values)
+        delta = bonus.view(self.n, 1) * bonus_scales
+
+        adjusted = target_probs.clone()
+        wl_mass = adjusted[:, :, 0] + adjusted[:, :, 1]
+        wl_center = adjusted[:, :, 0] - adjusted[:, :, 1]
+        shifted_center = torch.clamp(wl_center + 2.0 * delta, min=-wl_mass, max=wl_mass)
+        adjusted[:, :, 0] = 0.5 * (wl_mass + shifted_center)
+        adjusted[:, :, 1] = 0.5 * (wl_mass - shifted_center)
+        return adjusted
+
     def loss_td_score_samplewise(self, pred, target, weight, global_weight):
         assert pred.shape == (self.n, self.num_td_values)
         assert target.shape == (self.n, self.num_td_values)
@@ -483,6 +499,8 @@ class Metrics:
         target_td_value = torch.stack(
             (target_global_nc[:, 4:7], target_global_nc[:, 8:11], target_global_nc[:, 12:15]), dim=1
         )
+        target_local_bonus = target_global_nc[:, 61]
+        target_td_value = self.apply_local_bonus_to_td_value_targets(target_td_value, target_local_bonus)
         target_td_score = torch.cat(
             (target_global_nc[:, 7:8], target_global_nc[:, 11:12], target_global_nc[:, 15:16]), dim=1
         )
@@ -785,6 +803,8 @@ class Metrics:
         target_value = torch.nn.functional.softmax(target_value_logits, dim=1)
         target_scoremean = target_pred_scoremean
         target_td_value = torch.nn.functional.softmax(target_td_value_logits, dim=2)
+        target_local_bonus = target_global_nc[:, 61]
+        target_td_value = self.apply_local_bonus_to_td_value_targets(target_td_value, target_local_bonus)
         target_td_score = target_pred_td_score
 
         target_lead = target_pred_lead

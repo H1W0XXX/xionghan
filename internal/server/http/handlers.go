@@ -413,6 +413,11 @@ func isRepetitionForbidden(hashCount map[uint64]int, nextPos *xionghan.Position)
 	if nextPos == nil {
 		return true
 	}
+	// 仅对“这一步形成将军”的一方做长将禁手。
+	// 被将军方（应将方）不受该规则限制。
+	if !nextPos.IsInCheck(nextPos.SideToMove) {
+		return false
+	}
 	nextHash := nextPos.EnsureHash()
 	return hashCount[nextHash]+1 >= 3
 }
